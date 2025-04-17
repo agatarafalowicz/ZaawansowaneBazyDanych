@@ -1,0 +1,4 @@
+pacjenci:pesel:*PESEL:PESEL
+pacjenci:imie:*PESEL:Name
+pacjenci:DataUrodzenia:*PESEL:BirthDate
+lekarze:imie:*Imie
