@@ -1,12 +1,13 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, filedialog
 import psycopg2
 from psycopg2 import sql
 from faker import Faker
 import random
 from datetime import datetime, timedelta
-import re
-
+import os
+import BasicDataGenerator
+import SpecialDataGenerator
 
 class UniversalDataGenerator:
     def __init__(self, root):
@@ -19,15 +20,22 @@ class UniversalDataGenerator:
         self.faker = Faker('pl_PL')
         self.tables = {}
         self.generation_rules = {}
-        self.custom_values = {}
-        self.constraints = {}
         self.column_lengths_cache = {}
         self.pacjenci_ids = []
         self.lekarze_ids = []
         self.wizyty_ids = []
+        self.special_data = self.load_special_data("plik.txt")
 
         self.setup_ui()
         self.load_last_config()
+
+    def load_special_data(self, path):
+        raw_data = BasicDataGenerator.LoadDataTypes(path)
+        special_data = {}
+        for (table, column), value in raw_data.items():
+            key = (table.lower(), column.lower())
+            special_data[key] = value
+        return special_data
 
     def setup_ui(self):
         self.notebook = ttk.Notebook(self.root)
@@ -98,6 +106,12 @@ class UniversalDataGenerator:
         configure_btn = ttk.Button(btn_frame, text="Konfiguruj", command=self.configure_table)
         configure_btn.pack(side=tk.LEFT, padx=5)
 
+        save_config_btn = ttk.Button(btn_frame, text="Zapisz konfig", command=self.save_configuration)
+        save_config_btn.pack(side=tk.LEFT, padx=5)
+
+        load_config_btn = ttk.Button(btn_frame, text="Wczytaj konfig", command=self.load_configuration)
+        load_config_btn.pack(side=tk.LEFT, padx=5)
+
     def setup_generation_tab(self):
         tab = ttk.Frame(self.notebook)
         self.notebook.add(tab, text="Generacja")
@@ -123,6 +137,11 @@ class UniversalDataGenerator:
 
         clear_btn = ttk.Button(tab, text="Wyczyść log", command=self.clear_log)
         clear_btn.pack(side=tk.RIGHT, padx=10, pady=5)
+
+    def clear_log(self):
+        self.log_text.config(state=tk.NORMAL)
+        self.log_text.delete(1.0, tk.END)
+        self.log_text.config(state=tk.DISABLED)
 
     def setup_patterns_tab(self):
         tab = ttk.Frame(self.notebook)
@@ -403,7 +422,7 @@ class UniversalDataGenerator:
             rule = self.generation_rules[table][column]
             if rule['type'] == "custom":
                 var.set("custom")
-                self.custom_values_entry.insert(0, ",".join(rule['values']))
+                self.custom_values_entry.insert(0, ";".join(rule['values']))
             elif rule['type'] == "pattern":
                 var.set("pattern")
                 self.pattern_entry.insert(0, rule['pattern'])
@@ -419,9 +438,9 @@ class UniversalDataGenerator:
 
     def save_column_config(self, window, table, column, config_type):
         if config_type == "custom":
-            values = [v.strip() for v in self.custom_values_entry.get().split(",")]
+            values = [v.strip() for v in self.custom_values_entry.get().split(";")]
             if not values:
-                messagebox.showerror("Błąd", "Podaj wartości oddzielone przecinkami")
+                messagebox.showerror("Błąd", "Podaj wartości oddzielone średnikami")
                 return
             self.set_generation_rule(table, column, "custom", values=values)
         elif config_type == "pattern":
@@ -458,11 +477,11 @@ class UniversalDataGenerator:
         }
 
     def add_pattern(self):
-        symbol = simpledialog.askstring("Nowy wzór", "Podaj symbol (1 znak):")
+        symbol = simpledialog.askstring("Nowy wzór", "Podaj symbol (1 znak):", parent=self.root)
         if not symbol or len(symbol) != 1:
             return
 
-        definition = simpledialog.askstring("Nowy wzór", "Podaj definicję:")
+        definition = simpledialog.askstring("Nowy wzór", "Podaj definicję:", parent=self.root)
         if not definition:
             return
 
@@ -478,6 +497,65 @@ class UniversalDataGenerator:
         if symbol in self.pattern_definitions:
             del self.pattern_definitions[symbol]
             self.patterns_tree.delete(selected[0])
+
+    def save_configuration(self):
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            parent=self.root
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "w") as f:
+                for table in self.generation_rules:
+                    for column in self.generation_rules[table]:
+                        rule = self.generation_rules[table][column]
+                        if rule['type'] == "custom":
+                            values = ";".join(rule['values'])
+                            line = f"{table}@{column}@{values}\n"
+                            f.write(line)
+            self.log(f"Zapisano konfigurację do {file_path}")
+        except Exception as e:
+            messagebox.showerror("Błąd", str(e))
+
+    def load_configuration(self):
+        file_path = filedialog.askopenfilename(
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            parent=self.root
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        parts = line.split("@")
+                        if len(parts) != 3:
+                            self.log(f"Nieprawidłowy format linii: {line}")
+                            continue
+
+                        table, column, values_str = parts
+                        values = [v.strip() for v in values_str.split(";") if v.strip()]
+
+                        if table not in self.generation_rules:
+                            self.generation_rules[table] = {}
+
+                        self.generation_rules[table][column] = {
+                            'type': 'custom',
+                            'values': values
+                        }
+                        self.log(f"Zapisano regułę dla {table}.{column}")
+                    except Exception as e:
+                        self.log(f"Błąd przetwarzania linii {line}: {str(e)}")
+            self.log(f"Wczytano konfigurację z {file_path}")
+        except Exception as e:
+            messagebox.showerror("Błąd", f"Nie udało się wczytać pliku: {str(e)}")
 
     def generate_data(self):
         if not self.conn:
@@ -513,7 +591,10 @@ class UniversalDataGenerator:
             for _ in range(current_batch_size):
                 row = []
                 for column in columns:
-                    row.append(self.generate_value(table, column))
+                    value = self.generate_value(table, column)
+                    if value is None and column in [col['name'] for col in self.tables[table] if not col['nullable']]:
+                        value = self.generate_default_value(table, column)
+                    row.append(value)
                 batch.append(row)
 
             try:
@@ -599,6 +680,13 @@ class UniversalDataGenerator:
 
     def generate_default_value(self, table, column):
         col_info = next(col for col in self.tables[table] if col['name'] == column)
+        key = (table.lower(), column.lower())
+        if key in self.special_data:
+            try:
+                generated_value = BasicDataGenerator.GenerateData(self.special_data[key])
+                return self._truncate_value(table, column, generated_value)
+            except Exception as e:
+                self.log(f"Błąd generowania specjalnych danych dla {table}.{column}: {str(e)}")
 
         if col_info['type'] in ['integer', 'bigint', 'smallint']:
             return random.randint(0, 1000)
@@ -639,54 +727,37 @@ class UniversalDataGenerator:
 
         return None
 
-    def generate_valid_pesel(self, birth_date=None):
-        """Generuje prawidłowy numer PESEL"""
-        if birth_date is None:
-            if random.random() < 0.95:
-                start_date = datetime(1940, 1, 1)
-            else:
-                start_date = datetime(1912, 1, 1)
-            end_date = datetime(2002, 12, 31)
-            birth_date = start_date + timedelta(days=random.randint(0, (end_date - start_date).days))
+    def get_or_generate_ids(self, table, generate_func):
+        try:
+            id_columns = {
+                'pacjenci': 'id_pacjenta',
+                'lekarze': 'id_lekarza',
+                'wizyty': 'id_wizyty',
+                'recepty': 'id_recepty',
+                'skierowania': 'id_skierowania'
+            }
 
-        year = birth_date.year
-        month = birth_date.month
-        day = birth_date.day
+            column = id_columns.get(table.lower())
+            if not column:
+                self.log(f"Błąd: Nieznana tabela {table}")
+                return []
 
-        if year >= 2000:
-            month += 20
+            query = f"SELECT {column} FROM {table}"
+            self.cursor.execute(query)
+            ids = [row[0] for row in self.cursor.fetchall()]
 
-        date_part = f"{year % 100:02d}{month:02d}{day:02d}"
+            if not ids:
+                generate_func(1, 1)
+                self.conn.commit()
+                self.cursor.execute(query)
+                ids = [row[0] for row in self.cursor.fetchall()]
 
-        gender_num = random.randint(0, 4) * 2 + random.choice([0, 1])
-        random_part = f"{random.randint(0, 999):03d}{gender_num}"
+            return ids
 
-        pesel_without_checksum = date_part + random_part
-
-        weights = [1, 3, 7, 9, 1, 3, 7, 9, 1, 3]
-        checksum = 0
-
-        for i in range(10):
-            checksum += int(pesel_without_checksum[i]) * weights[i]
-
-        checksum = (10 - (checksum % 10)) % 10
-
-        return pesel_without_checksum + str(checksum), 'K' if gender_num % 2 == 0 else 'M'
-
-    def generate_name_by_gender(self, gender):
-        if gender == 'M':
-            return self.faker.first_name_male()
-        else:
-            return self.faker.first_name_female()
-
-    def generate_nfz_number(self):
-        return self.faker.bothify(text='??#########')
-
-    def generate_pwz_number(self):
-        return str(random.randint(1, 9)) + str(random.randint(0, 999999)).zfill(6)
-
-    def generate_icd9_code(self):
-        return self.faker.bothify(text='?##.?#?')
+        except Exception as e:
+            self.conn.rollback()
+            self.log(f"Błąd podczas pobierania ID: {str(e)}")
+            return []
 
     def generate_medical_data(self, table_type):
         if not self.conn:
@@ -694,13 +765,22 @@ class UniversalDataGenerator:
             return
 
         try:
-            count = simpledialog.askinteger("Generowanie danych", f"Ile rekordów {table_type} wygenerować?", minvalue=1,
-                                            maxvalue=10000)
+            count = simpledialog.askinteger("Generowanie danych",
+                                            f"Ile rekordów {table_type} wygenerować?",
+                                            parent=self.root,
+                                            minvalue=1,
+                                            maxvalue=10000
+                                            )
             if not count:
                 return
 
-            batch_size = simpledialog.askinteger("Generowanie danych", "Rozmiar partii:", initialvalue=10, minvalue=1,
-                                                 maxvalue=100)
+            batch_size = simpledialog.askinteger("Generowanie danych",
+                                                 "Rozmiar partii:",
+                                                 parent=self.root,
+                                                 initialvalue=10,
+                                                 minvalue=1,
+                                                 maxvalue=100
+                                                 )
             if not batch_size:
                 return
 
@@ -709,18 +789,29 @@ class UniversalDataGenerator:
             elif table_type == 'lekarze':
                 self.generate_lekarze(count, batch_size)
             elif table_type == 'wizyty':
+                self.pacjenci_ids = self.get_or_generate_ids('pacjenci', self.generate_pacjenci)
+                self.lekarze_ids = self.get_or_generate_ids('lekarze', self.generate_lekarze)
                 self.generate_wizyty(count, batch_size)
             elif table_type == 'recepty':
+                self.pacjenci_ids = self.get_or_generate_ids('pacjenci', self.generate_pacjenci)
+                self.lekarze_ids = self.get_or_generate_ids('lekarze', self.generate_lekarze)
                 self.generate_recepty(count, batch_size)
             elif table_type == 'skierowania':
+                self.pacjenci_ids = self.get_or_generate_ids('pacjenci', self.generate_pacjenci)
+                self.lekarze_ids = self.get_or_generate_ids('lekarze', self.generate_lekarze)
                 self.generate_skierowania(count, batch_size)
             elif table_type == 'historia_chorob':
+                self.pacjenci_ids = self.get_or_generate_ids('pacjenci', self.generate_pacjenci)
                 self.generate_historia_chorob(count, batch_size)
             elif table_type == 'badania_diagnostyczne':
+                self.pacjenci_ids = self.get_or_generate_ids('pacjenci', self.generate_pacjenci)
                 self.generate_badania_diagnostyczne(count, batch_size)
             elif table_type == 'platnosci':
+                self.pacjenci_ids = self.get_or_generate_ids('pacjenci', self.generate_pacjenci)
+                self.wizyty_ids = self.get_or_generate_ids('wizyty', self.generate_wizyty)
                 self.generate_platnosci(count, batch_size)
             elif table_type == 'ewus':
+                self.pacjenci_ids = self.get_or_generate_ids('pacjenci', self.generate_pacjenci)
                 self.generate_ewus(count, batch_size)
 
         except Exception as e:
@@ -733,53 +824,40 @@ class UniversalDataGenerator:
 
         try:
             counts = {
-                'pacjenci': simpledialog.askinteger("Generowanie danych", "Ile pacjentów wygenerować?", minvalue=1,
-                                                    maxvalue=10000),
-                'lekarze': simpledialog.askinteger("Generowanie danych", "Ile lekarzy wygenerować?", minvalue=1,
-                                                   maxvalue=1000),
-                'wizyty': simpledialog.askinteger("Generowanie danych", "Ile wizyt wygenerować?", minvalue=1,
-                                                  maxvalue=10000),
-                'recepty': simpledialog.askinteger("Generowanie danych", "Ile recept wygenerować?", minvalue=1,
-                                                   maxvalue=10000),
-                'skierowania': simpledialog.askinteger("Generowanie danych", "Ile skierowań wygenerować?", minvalue=1,
-                                                       maxvalue=10000),
+                'pacjenci': simpledialog.askinteger("Generowanie danych", "Ile pacjentów wygenerować?",
+                                                    parent=self.root, minvalue=1, maxvalue=10000),
+                'lekarze': simpledialog.askinteger("Generowanie danych", "Ile lekarzy wygenerować?", parent=self.root,
+                                                   minvalue=1, maxvalue=1000),
+                'wizyty': simpledialog.askinteger("Generowanie danych", "Ile wizyt wygenerować?", parent=self.root,
+                                                  minvalue=1, maxvalue=10000),
+                'recepty': simpledialog.askinteger("Generowanie danych", "Ile recept wygenerować?", parent=self.root,
+                                                   minvalue=1, maxvalue=10000),
+                'skierowania': simpledialog.askinteger("Generowanie danych", "Ile skierowań wygenerować?",
+                                                       parent=self.root, minvalue=1, maxvalue=10000),
                 'historia_chorob': simpledialog.askinteger("Generowanie danych",
-                                                           "Ile wpisów historii chorób wygenerować?", minvalue=1,
-                                                           maxvalue=10000),
+                                                           "Ile wpisów historii chorób wygenerować?", parent=self.root,
+                                                           minvalue=1, maxvalue=10000),
                 'badania_diagnostyczne': simpledialog.askinteger("Generowanie danych",
-                                                                 "Ile badań diagnostycznych wygenerować?", minvalue=1,
-                                                                 maxvalue=10000),
-                'platnosci': simpledialog.askinteger("Generowanie danych", "Ile płatności wygenerować?", minvalue=1,
-                                                     maxvalue=10000),
-                'ewus': simpledialog.askinteger("Generowanie danych", "Ile weryfikacji eWUŚ wygenerować?", minvalue=1,
-                                                maxvalue=10000)
+                                                                 "Ile badań diagnostycznych wygenerować?",
+                                                                 parent=self.root, minvalue=1, maxvalue=10000),
+                'platnosci': simpledialog.askinteger("Generowanie danych", "Ile płatności wygenerować?",
+                                                     parent=self.root, minvalue=1, maxvalue=10000),
+                'ewus': simpledialog.askinteger("Generowanie danych", "Ile weryfikacji eWUŚ wygenerować?",
+                                                parent=self.root, minvalue=1, maxvalue=10000)
             }
 
-            batch_size = simpledialog.askinteger("Generowanie danych", "Rozmiar partii:", initialvalue=10, minvalue=1,
-                                                 maxvalue=100)
+            batch_size = simpledialog.askinteger("Generowanie danych", "Rozmiar partii:", parent=self.root,
+                                                 initialvalue=10, minvalue=1, maxvalue=100)
             if not batch_size:
                 return
 
+            self.pacjenci_ids = self.get_or_generate_ids('pacjenci', self.generate_pacjenci)
+            self.lekarze_ids = self.get_or_generate_ids('lekarze', self.generate_lekarze)
+            self.wizyty_ids = self.get_or_generate_ids('wizyty', self.generate_wizyty)
+
             for table_type, count in counts.items():
-                if count:
-                    if table_type == 'pacjenci':
-                        self.generate_pacjenci(count, batch_size)
-                    elif table_type == 'lekarze':
-                        self.generate_lekarze(count, batch_size)
-                    elif table_type == 'wizyty':
-                        self.generate_wizyty(count, batch_size)
-                    elif table_type == 'recepty':
-                        self.generate_recepty(count, batch_size)
-                    elif table_type == 'skierowania':
-                        self.generate_skierowania(count, batch_size)
-                    elif table_type == 'historia_chorob':
-                        self.generate_historia_chorob(count, batch_size)
-                    elif table_type == 'badania_diagnostyczne':
-                        self.generate_badania_diagnostyczne(count, batch_size)
-                    elif table_type == 'platnosci':
-                        self.generate_platnosci(count, batch_size)
-                    elif table_type == 'ewus':
-                        self.generate_ewus(count, batch_size)
+                if count and count > 0:
+                    self.generate_medical_data(table_type)
 
             messagebox.showinfo("Sukces", "Generowanie danych medycznych zakończone")
         except Exception as e:
@@ -796,19 +874,13 @@ class UniversalDataGenerator:
             if self.cursor.fetchone()[0] > 0:
                 continue
 
-            imie = self._truncate_value('Pacjenci', 'Imie', self.generate_name_by_gender(gender))
-            nazwisko = self._truncate_value('Pacjenci', 'Nazwisko', self.faker.last_name())
-            adres = self._truncate_value('Pacjenci', 'Adres', self.faker.address().replace('\n', ', '))
-            telefon = self._truncate_value('Pacjenci', 'Telefon', self.faker.phone_number().replace(' ', '')[:15])
-            email = self._truncate_value('Pacjenci', 'Email', self.faker.email())
-
             batch.append({
-                'Imie': imie,
-                'Nazwisko': nazwisko,
+                'Imie': self._truncate_value('Pacjenci', 'Imie', self.generate_name_by_gender(gender)),
+                'Nazwisko': self._truncate_value('Pacjenci', 'Nazwisko', self.faker.last_name()),
                 'PESEL': pesel,
-                'Adres': adres,
-                'Telefon': telefon,
-                'Email': email,
+                'Adres': self._truncate_value('Pacjenci', 'Adres', self.faker.address().replace('\n', ', ')),
+                'Telefon': self._truncate_value('Pacjenci', 'Telefon', self.faker.phone_number().replace(' ', '')[:15]),
+                'Email': self._truncate_value('Pacjenci', 'Email', self.faker.email()),
                 'NFZ_Numer_Ubezpieczenia': self.generate_nfz_number()
             })
 
@@ -828,12 +900,17 @@ class UniversalDataGenerator:
 
         self.medical_log(f"Wygenerowano {count} pacjentów.")
 
+    def generate_name_by_gender(self, gender):
+        if gender == 'M':
+            return self.faker.first_name_male()
+        else:
+            return self.faker.first_name_female()
+
     def generate_lekarze(self, count, batch_size):
         self.medical_log("Rozpoczynanie generowania lekarzy...")
         batch = []
         generated = 0
-        specjalizacje = ['kardiolog', 'neurolog', 'kardiochirurg', 'pulmonolog', 'internista', 'dermatolog',
-                         'neurochirurg', 'ortopeda']
+        specjalizacje = ['kardiolog', 'neurolog', 'kardiochirurg', 'pulmonolog', 'internista']
 
         self.cursor.execute("SELECT COALESCE(MAX(ID_Lekarza), 0) FROM Lekarze")
         max_id = self.cursor.fetchone()[0]
@@ -846,15 +923,11 @@ class UniversalDataGenerator:
                 continue
 
             gender = random.choices(['M', 'K'], weights=[55, 45])[0]
-            imie = self._truncate_value('Lekarze', 'Imie', self.generate_name_by_gender(gender))
-            nazwisko = self._truncate_value('Lekarze', 'Nazwisko', self.faker.last_name())
-            specjalizacja = self._truncate_value('Lekarze', 'Specjalizacja', random.choice(specjalizacje))
-
             batch.append({
                 'ID_Lekarza': next_id,
-                'Imie': imie,
-                'Nazwisko': nazwisko,
-                'Specjalizacja': specjalizacja,
+                'Imie': self._truncate_value('Lekarze', 'Imie', self.generate_name_by_gender(gender)),
+                'Nazwisko': self._truncate_value('Lekarze', 'Nazwisko', self.faker.last_name()),
+                'Specjalizacja': self._truncate_value('Lekarze', 'Specjalizacja', random.choice(specjalizacje)),
                 'Numer_PWZ': pwz,
                 'NFZ_Kod_Lekarza': self.generate_nfz_number()
             })
@@ -864,135 +937,124 @@ class UniversalDataGenerator:
                 query = """
                     INSERT INTO Lekarze (ID_Lekarza, Imie, Nazwisko, Specjalizacja, Numer_PWZ, NFZ_Kod_Lekarza)
                     VALUES (%(ID_Lekarza)s, %(Imie)s, %(Nazwisko)s, %(Specjalizacja)s, %(Numer_PWZ)s, %(NFZ_Kod_Lekarza)s)
-                    RETURNING ID_Lekarza
                 """
                 if self._insert_medical_batch(query, batch):
                     generated += len(batch)
                     self.medical_log(f"Dodano {len(batch)} lekarzy. Łącznie: {generated}")
-                    self.lekarze_ids.extend([row['ID_Lekarza'] for row in batch])
                 batch = []
 
         self.medical_log(f"Wygenerowano {count} lekarzy.")
 
     def generate_wizyty(self, count, batch_size):
         self.medical_log("Rozpoczynanie generowania wizyt...")
-        if not self.pacjenci_ids or not self.lekarze_ids:
-            self.medical_log("Błąd: Najpierw wygeneruj pacjentów i lekarzy")
-            return
-
         batch = []
         generated = 0
-        rodzaje_wizyt = ['NFZ', 'Prywatna']
-        statusy = ['Zrealizowana', 'Odwołana', 'Zaplanowana']
 
-        while generated < count:
-            pacjent_id = random.choice(self.pacjenci_ids)
-            lekarz_id = random.choice(self.lekarze_ids)
-            data_wizyty = self.faker.date_time_between(start_date='-1y', end_date='+1y')
-            rodzaj_wizyty = random.choice(rodzaje_wizyt)
-            status = random.choice(statusy)
-
+        for _ in range(count):
             batch.append({
-                'ID_Pacjenta': pacjent_id,
-                'ID_Lekarza': lekarz_id,
-                'Data_Wizyty': data_wizyty,
-                'Rodzaj_Wizyty': rodzaj_wizyty,
-                'Status': status
+                'ID_Pacjenta': random.choice(self.pacjenci_ids),
+                'ID_Lekarza': random.choice(self.lekarze_ids),
+                'Data_Wizyty': self.faker.date_time_between('-1y', '+1y'),
+                'Rodzaj_Wizyty': random.choice(['NFZ', 'Prywatna']),
+                'Status': random.choice(['Zrealizowana', 'Odwołana', 'Zaplanowana'])
             })
 
-            if len(batch) >= batch_size or generated + len(batch) >= count:
-                query = """
+            if len(batch) >= batch_size:
+                self._insert_medical_batch("""
                     INSERT INTO Wizyty (ID_Pacjenta, ID_Lekarza, Data_Wizyty, Rodzaj_Wizyty, Status)
                     VALUES (%(ID_Pacjenta)s, %(ID_Lekarza)s, %(Data_Wizyty)s, %(Rodzaj_Wizyty)s, %(Status)s)
-                    RETURNING ID_Wizyty
-                """
-                if self._insert_medical_batch(query, batch):
-                    self.cursor.execute("SELECT ID_Wizyty FROM Wizyty ORDER BY ID_Wizyty DESC LIMIT %s", (len(batch),))
-                    self.wizyty_ids.extend([row[0] for row in self.cursor.fetchall()])
-                    generated += len(batch)
-                    self.medical_log(f"Dodano {len(batch)} wizyt. Łącznie: {generated}")
+                """, batch)
+                generated += len(batch)
                 batch = []
 
-        self.medical_log(f"Wygenerowano {count} wizyt.")
+        if batch:
+            self._insert_medical_batch("""
+                INSERT INTO Wizyty (ID_Pacjenta, ID_Lekarza, Data_Wizyty, Rodzaj_Wizyty, Status)
+                VALUES (%(ID_Pacjenta)s, %(ID_Lekarza)s, %(Data_Wizyty)s, %(Rodzaj_Wizyty)s, %(Status)s)
+            """, batch)
+            generated += len(batch)
+
+        self.medical_log(f"Wygenerowano {generated} wizyt.")
 
     def generate_recepty(self, count, batch_size):
         self.medical_log("Rozpoczynanie generowania recept...")
-        if not self.pacjenci_ids or not self.lekarze_ids:
-            self.medical_log("Błąd: Najpierw wygeneruj pacjentów i lekarzy")
-            return
-
         batch = []
         generated = 0
-        produkty_lecznicze = [
-            'APAP', 'Ibuprom', 'Polopiryna', 'Euthyrox', 'Xanax',
-            'Aspirin', 'Paracetamol', 'Ketonal', 'No-Spa', 'Furosemid',
-            'Metformax', 'Bisocard', 'Atorvastatin', 'Amlodipine', 'Pantoprazole'
-        ]
+
+        produkty = self.generation_rules.get('Recepty', {}).get('Kod_Produktu_Leczniczego', {}).get('values', [])
+        if not produkty:
+            self.medical_log("BŁĄD: Brak produktów leczniczych w konfiguracji!")
+            messagebox.showerror("Błąd", "Najpierw skonfiguruj produkty lecznicze!")
+            return
 
         while generated < count:
-            pacjent_id = random.choice(self.pacjenci_ids)
-            lekarz_id = random.choice(self.lekarze_ids)
-            kod_produktu = random.choice(produkty_lecznicze)
-            dawkowanie = self._truncate_value('Recepty', 'Dawkowanie', self.faker.sentence(nb_words=6))
+            try:
+                pacjent_id = random.choice(self.pacjenci_ids)
+                lekarz_id = random.choice(self.lekarze_ids)
+                produkt = random.choice(produkty)
 
-            batch.append({
-                'ID_Pacjenta': pacjent_id,
-                'ID_Lekarza': lekarz_id,
-                'Data_Wystawienia': self.faker.date_between(start_date='-1y', end_date='today'),
-                'Kod_Produktu_Leczniczego': kod_produktu,
-                'Dawkowanie': dawkowanie
-            })
+                batch.append({
+                    'ID_Pacjenta': pacjent_id,
+                    'ID_Lekarza': lekarz_id,
+                    'Data_Wystawienia': self.faker.date_between('-1y', 'today'),
+                    'Kod_Produktu_Leczniczego': produkt,
+                    'Dawkowanie': self._truncate_value('Recepty', 'Dawkowanie', self.faker.sentence(nb_words=6))
+                })
 
-            if len(batch) >= batch_size or generated + len(batch) >= count:
-                query = """
-                    INSERT INTO Recepty (ID_Pacjenta, ID_Lekarza, Data_Wystawienia, Kod_Produktu_Leczniczego, Dawkowanie)
-                    VALUES (%(ID_Pacjenta)s, %(ID_Lekarza)s, %(Data_Wystawienia)s, %(Kod_Produktu_Leczniczego)s, %(Dawkowanie)s)
-                """
-                if self._insert_medical_batch(query, batch):
+                if len(batch) >= batch_size:
+                    self._insert_medical_batch("""
+                        INSERT INTO Recepty (ID_Pacjenta, ID_Lekarza, Data_Wystawienia, Kod_Produktu_Leczniczego, Dawkowanie)
+                        VALUES (%(ID_Pacjenta)s, %(ID_Lekarza)s, %(Data_Wystawienia)s, %(Kod_Produktu_Leczniczego)s, %(Dawkowanie)s)
+                    """, batch)
                     generated += len(batch)
-                    self.medical_log(f"Dodano {len(batch)} recept. Łącznie: {generated}")
-                batch = []
+                    batch = []
+                    self.medical_log(f"Dodano {generated} recept...")
 
-        self.medical_log(f"Wygenerowano {count} recept.")
+            except Exception as e:
+                self.medical_log(f"Błąd generowania recept: {str(e)}")
+                break
+
+        if batch:
+            self._insert_medical_batch("""
+                INSERT INTO Recepty (ID_Pacjenta, ID_Lekarza, Data_Wystawienia, Kod_Produktu_Leczniczego, Dawkowanie)
+                VALUES (%(ID_Pacjenta)s, %(ID_Lekarza)s, %(Data_Wystawienia)s, %(Kod_Produktu_Leczniczego)s, %(Dawkowanie)s)
+            """, batch)
+            generated += len(batch)
+
+        self.medical_log(f"Wygenerowano {generated} recept.")
 
     def generate_skierowania(self, count, batch_size):
         self.medical_log("Rozpoczynanie generowania skierowań...")
-        if not self.pacjenci_ids or not self.lekarze_ids:
-            self.medical_log("Błąd: Najpierw wygeneruj pacjentów i lekarzy")
-            return
-
         batch = []
         generated = 0
 
         while generated < count:
-            pacjent_id = random.choice(self.pacjenci_ids)
-            lekarz_id = random.choice(self.lekarze_ids)
-
             batch.append({
-                'ID_Pacjenta': pacjent_id,
-                'ID_Lekarza': lekarz_id,
-                'Data_Wystawienia': self.faker.date_between(start_date='-1y', end_date='today'),
+                'ID_Pacjenta': random.choice(self.pacjenci_ids),
+                'ID_Lekarza': random.choice(self.lekarze_ids),
+                'Data_Wystawienia': self.faker.date_between('-1y', 'today'),
                 'Kod_Procedury_ICD9': self.generate_icd9_code()
             })
 
-            if len(batch) >= batch_size or generated + len(batch) >= count:
-                query = """
+            if len(batch) >= batch_size:
+                self._insert_medical_batch("""
                     INSERT INTO Skierowania (ID_Pacjenta, ID_Lekarza, Data_Wystawienia, Kod_Procedury_ICD9)
                     VALUES (%(ID_Pacjenta)s, %(ID_Lekarza)s, %(Data_Wystawienia)s, %(Kod_Procedury_ICD9)s)
-                """
-                if self._insert_medical_batch(query, batch):
-                    generated += len(batch)
-                    self.medical_log(f"Dodano {len(batch)} skierowań. Łącznie: {generated}")
+                """, batch)
+                generated += len(batch)
                 batch = []
 
-        self.medical_log(f"Wygenerowano {count} skierowań.")
+        if batch:
+            self._insert_medical_batch("""
+                INSERT INTO Skierowania (ID_Pacjenta, ID_Lekarza, Data_Wystawienia, Kod_Procedury_ICD9)
+                VALUES (%(ID_Pacjenta)s, %(ID_Lekarza)s, %(Data_Wystawienia)s, %(Kod_Procedury_ICD9)s)
+            """, batch)
+            generated += len(batch)
+
+        self.medical_log(f"Wygenerowano {generated} skierowań.")
 
     def generate_historia_chorob(self, count, batch_size):
         self.medical_log("Rozpoczynanie generowania historii chorób...")
-        if not self.pacjenci_ids:
-            self.medical_log("Błąd: Najpierw wygeneruj pacjentów")
-            return
-
         batch = []
         generated = 0
         diagnozy = [
@@ -1014,24 +1076,25 @@ class UniversalDataGenerator:
                 'Opis': opis
             })
 
-            if len(batch) >= batch_size or generated + len(batch) >= count:
-                query = """
+            if len(batch) >= batch_size:
+                self._insert_medical_batch("""
                     INSERT INTO Historia_Chorob (ID_Pacjenta, Data_Diagnostyki, Opis)
                     VALUES (%(ID_Pacjenta)s, %(Data_Diagnostyki)s, %(Opis)s)
-                """
-                if self._insert_medical_batch(query, batch):
-                    generated += len(batch)
-                    self.medical_log(f"Dodano {len(batch)} wpisów. Łącznie: {generated}")
+                """, batch)
+                generated += len(batch)
                 batch = []
 
-        self.medical_log(f"Wygenerowano {count} wpisów do historii chorób.")
+        if batch:
+            self._insert_medical_batch("""
+                INSERT INTO Historia_Chorob (ID_Pacjenta, Data_Diagnostyki, Opis)
+                VALUES (%(ID_Pacjenta)s, %(Data_Diagnostyki)s, %(Opis)s)
+            """, batch)
+            generated += len(batch)
+
+        self.medical_log(f"Wygenerowano {generated} wpisów do historii chorób.")
 
     def generate_badania_diagnostyczne(self, count, batch_size):
         self.medical_log("Rozpoczynanie generowania badań diagnostycznych...")
-        if not self.pacjenci_ids:
-            self.medical_log("Błąd: Najpierw wygeneruj pacjentów")
-            return
-
         batch = []
         generated = 0
         rodzaje_badan = [
@@ -1055,24 +1118,25 @@ class UniversalDataGenerator:
                 'Wynik': wynik
             })
 
-            if len(batch) >= batch_size or generated + len(batch) >= count:
-                query = """
+            if len(batch) >= batch_size:
+                self._insert_medical_batch("""
                     INSERT INTO Badania_Diagnostyczne (ID_Pacjenta, Rodzaj_Badania, Data_Badania, Wynik)
                     VALUES (%(ID_Pacjenta)s, %(Rodzaj_Badania)s, %(Data_Badania)s, %(Wynik)s)
-                """
-                if self._insert_medical_batch(query, batch):
-                    generated += len(batch)
-                    self.medical_log(f"Dodano {len(batch)} badań. Łącznie: {generated}")
+                """, batch)
+                generated += len(batch)
                 batch = []
 
-        self.medical_log(f"Wygenerowano {count} badań diagnostycznych.")
+        if batch:
+            self._insert_medical_batch("""
+                INSERT INTO Badania_Diagnostyczne (ID_Pacjenta, Rodzaj_Badania, Data_Badania, Wynik)
+                VALUES (%(ID_Pacjenta)s, %(Rodzaj_Badania)s, %(Data_Badania)s, %(Wynik)s)
+            """, batch)
+            generated += len(batch)
+
+        self.medical_log(f"Wygenerowano {generated} badań diagnostycznych.")
 
     def generate_platnosci(self, count, batch_size):
         self.medical_log("Rozpoczynanie generowania płatności...")
-        if not self.pacjenci_ids or not self.wizyty_ids:
-            self.medical_log("Błąd: Najpierw wygeneruj pacjentów i wizyty")
-            return
-
         batch = []
         generated = 0
         metody_platnosci = ['Gotówka', 'Karta', 'Przelew']
@@ -1097,24 +1161,25 @@ class UniversalDataGenerator:
                 'Metoda_Platnosci': random.choice(metody_platnosci)
             })
 
-            if len(batch) >= batch_size or generated + len(batch) >= count:
-                query = """
+            if len(batch) >= batch_size:
+                self._insert_medical_batch("""
                     INSERT INTO Platnosci (ID_Pacjenta, ID_Wizyty, Kwota, Data_Platnosci, Metoda_Platnosci)
                     VALUES (%(ID_Pacjenta)s, %(ID_Wizyty)s, %(Kwota)s, %(Data_Platnosci)s, %(Metoda_Platnosci)s)
-                """
-                if self._insert_medical_batch(query, batch):
-                    generated += len(batch)
-                    self.medical_log(f"Dodano {len(batch)} płatności. Łącznie: {generated}")
+                """, batch)
+                generated += len(batch)
                 batch = []
 
-        self.medical_log(f"Wygenerowano {count} płatności.")
+        if batch:
+            self._insert_medical_batch("""
+                INSERT INTO Platnosci (ID_Pacjenta, ID_Wizyty, Kwota, Data_Platnosci, Metoda_Platnosci)
+                VALUES (%(ID_Pacjenta)s, %(ID_Wizyty)s, %(Kwota)s, %(Data_Platnosci)s, %(Metoda_Platnosci)s)
+            """, batch)
+            generated += len(batch)
+
+        self.medical_log(f"Wygenerowano {generated} płatności.")
 
     def generate_ewus(self, count, batch_size):
         self.medical_log("Rozpoczynanie generowania weryfikacji eWUŚ...")
-        if not self.pacjenci_ids:
-            self.medical_log("Błąd: Najpierw wygeneruj pacjentów")
-            return
-
         batch = []
         generated = 0
         statusy = ['Ubezpieczony', 'Brak uprawnień']
@@ -1128,17 +1193,52 @@ class UniversalDataGenerator:
                 'Status': random.choices(statusy, weights=[0.85, 0.15])[0]
             })
 
-            if len(batch) >= batch_size or generated + len(batch) >= count:
-                query = """
+            if len(batch) >= batch_size:
+                self._insert_medical_batch("""
                     INSERT INTO EWUS (ID_Pacjenta, Data_Weryfikacji, Status)
                     VALUES (%(ID_Pacjenta)s, %(Data_Weryfikacji)s, %(Status)s)
-                """
-                if self._insert_medical_batch(query, batch):
-                    generated += len(batch)
-                    self.medical_log(f"Dodano {len(batch)} weryfikacji. Łącznie: {generated}")
+                """, batch)
+                generated += len(batch)
                 batch = []
 
-        self.medical_log(f"Wygenerowano {count} weryfikacji eWUŚ.")
+        if batch:
+            self._insert_medical_batch("""
+                INSERT INTO EWUS (ID_Pacjenta, Data_Weryfikacji, Status)
+                VALUES (%(ID_Pacjenta)s, %(Data_Weryfikacji)s, %(Status)s)
+            """, batch)
+            generated += len(batch)
+
+        self.medical_log(f"Wygenerowano {generated} weryfikacji eWUŚ.")
+
+    def generate_valid_pesel(self, birth_date=None):
+        if birth_date is None:
+            birth_date = self.faker.date_of_birth(minimum_age=18, maximum_age=90)
+
+        year = birth_date.year % 100
+        month = birth_date.month
+        if birth_date.year >= 2000:
+            month += 20
+
+        day = birth_date.day
+        random_part = f"{random.randint(0, 999):03d}"
+        gender_digit = random.randint(0, 9)
+
+        pesel = f"{year:02d}{month:02d}{day:02d}{random_part}{gender_digit}"
+
+        weights = [1, 3, 7, 9, 1, 3, 7, 9, 1, 3]
+        checksum = sum(int(pesel[i]) * weights[i] for i in range(10)) % 10
+        checksum = (10 - checksum) % 10
+
+        return f"{pesel}{checksum}", 'K' if gender_digit % 2 == 0 else 'M'
+
+    def generate_nfz_number(self):
+        return self.faker.bothify(text='??#########')
+
+    def generate_pwz_number(self):
+        return str(random.randint(1, 9)) + str(random.randint(0, 999999)).zfill(6)
+
+    def generate_icd9_code(self):
+        return self.faker.bothify(text='?##.?#?')
 
     def _insert_medical_batch(self, query, batch):
         try:
@@ -1147,7 +1247,8 @@ class UniversalDataGenerator:
             return True
         except Exception as e:
             self.conn.rollback()
-            self.medical_log(f"Błąd podczas wstawiania danych: {str(e)}")
+            error_msg = f"Błąd: {str(e)}\nProblem dotyczy zapytania: {query}\nDane: {batch}"
+            self.medical_log(error_msg)
             return False
 
     def medical_log(self, message):
@@ -1191,7 +1292,6 @@ class UniversalDataGenerator:
         if self.conn:
             self.conn.close()
         self.root.destroy()
-
 
 if __name__ == "__main__":
     root = tk.Tk()
