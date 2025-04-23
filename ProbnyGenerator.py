@@ -1,4 +1,5 @@
 import tkinter as tk
+from collections import defaultdict
 from tkinter import ttk, messagebox, simpledialog, filedialog
 import psycopg2
 from psycopg2 import sql
@@ -22,7 +23,11 @@ class UniversalDataGenerator:
         self.column_lengths_cache = {}
         self.special_data = self.load_special_data("plik.txt")
         self.current_config_widget = None
-
+        self.primary_keys = defaultdict(list)
+        self.foreign_keys = {}
+        self.table_dependencies = defaultdict(list)
+        self.generated_ids = defaultdict(list)
+        self.auto_increment = defaultdict(dict)
         self.setup_ui()
         self.load_last_config()
 
@@ -169,11 +174,74 @@ class UniversalDataGenerator:
             )
             self.cursor = self.conn.cursor()
             self.load_tables()
+            self.load_table_metadata()
             self._cache_column_lengths()
             self.notebook.select(1)
             self.log("Połączono z bazą danych")
         except Exception as e:
             messagebox.showerror("Błąd połączenia", str(e))
+
+    def load_table_metadata(self):
+        """Ładuje metadane o kluczach głównych, obcych i zależnościach"""
+        try:
+            self.cursor.execute("""
+                SELECT kcu.table_name, kcu.column_name
+                FROM information_schema.key_column_usage AS kcu
+                JOIN information_schema.table_constraints AS tc
+                    ON kcu.constraint_name = tc.constraint_name
+                WHERE tc.constraint_type = 'PRIMARY KEY'
+                    AND tc.table_schema = 'public'
+            """)
+            for table, column in self.cursor.fetchall():
+                self.primary_keys[table].append(column)
+
+            self.cursor.execute("""
+                SELECT
+                    tc.table_name AS child_table,
+                    kcu.column_name AS child_column,
+                    ccu.table_name AS parent_table,
+                    ccu.column_name AS parent_column
+                FROM information_schema.table_constraints AS tc
+                JOIN information_schema.key_column_usage AS kcu
+                    ON tc.constraint_name = kcu.constraint_name
+                JOIN information_schema.constraint_column_usage AS ccu
+                    ON tc.constraint_name = ccu.constraint_name
+                WHERE tc.constraint_type = 'FOREIGN KEY'
+                    AND tc.table_schema = 'public'
+            """)
+            for child_table, child_col, parent_table, parent_col in self.cursor.fetchall():
+                self.foreign_keys[(child_table, child_col)] = (parent_table, parent_col)
+                self.table_dependencies[parent_table].append(child_table)
+
+            self.cursor.execute("""
+                SELECT table_name, column_name
+                FROM information_schema.columns
+                WHERE column_default LIKE 'nextval(%'
+                    AND table_schema = 'public'
+            """)
+            for table, column in self.cursor.fetchall():
+                self.auto_increment[table][column] = True
+
+        except Exception as e:
+            messagebox.showerror("Błąd metadanych", str(e))
+
+    def topological_sort(self, tables):
+        """Sortuje tabele według zależności"""
+        visited = {}
+        result = []
+
+        def visit(table):
+            if table in visited:
+                return
+            visited[table] = True
+            for dependent in self.table_dependencies.get(table, []):
+                if dependent in tables:
+                    visit(dependent)
+            result.append(table)
+
+        for table in tables:
+            visit(table)
+        return reversed(result)
 
     def load_tables(self):
         if not self.conn:
@@ -347,21 +415,43 @@ class UniversalDataGenerator:
             return
 
         try:
-            for table in self.generation_rules:
-                count = int(self.records_entry.get())
-                batch_size = int(self.batch_entry.get())
-                self.generate_table_data(table, count, batch_size)
+            tables = list(self.generation_rules.keys())
+            all_tables = self.get_all_dependent_tables(tables)
+            sorted_tables = self.topological_sort(all_tables)
+
+            for table in sorted_tables:
+                if table not in self.generation_rules:
+                    self.ensure_minimum_records(table)
+                else:
+                    count = int(self.records_entry.get())
+                    batch_size = int(self.batch_entry.get())
+                    self.generate_table_data(table, count, batch_size)
+
             messagebox.showinfo("Sukces", "Dane wygenerowane!")
         except Exception as e:
             messagebox.showerror("Błąd", str(e))
 
     def generate_table_data(self, table, count, batch_size):
-        columns = [c['name'] for c in self.tables[table] if not c['name'].startswith('id_')]
+        columns = []
+        returning = None
+        if table in self.primary_keys:
+            pk = self.primary_keys[table][0]
+            if self.auto_increment.get(table, {}).get(pk, False):
+                columns = [col['name'] for col in self.tables[table] if col['name'] != pk]
+                returning = pk
+            else:
+                columns = [col['name'] for col in self.tables[table]]
+        else:
+            columns = [col['name'] for col in self.tables[table]]
+
         query = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
             sql.Identifier(table),
             sql.SQL(', ').join(map(sql.Identifier, columns)),
             sql.SQL(', ').join([sql.Placeholder()] * len(columns))
         )
+
+        if returning:
+            query += sql.SQL(" RETURNING {}").format(sql.Identifier(returning))
 
         for i in range(0, count, batch_size):
             current_batch = min(batch_size, count - i)
@@ -369,15 +459,78 @@ class UniversalDataGenerator:
             for _ in range(current_batch):
                 row = [self.generate_value(table, col) for col in columns]
                 batch.append(row)
+
             try:
-                self.cursor.executemany(query, batch)
+                if returning:
+                    ids = []
+                    for record in batch:
+                        self.cursor.execute(query, record)
+                        ids.append(self.cursor.fetchone()[0])
+                    self.generated_ids[table].extend(ids)
+                else:
+                    self.cursor.executemany(query, batch)
+
                 self.conn.commit()
                 self.log(f"Dodano {len(batch)} rekordów do {table}")
             except Exception as e:
                 self.conn.rollback()
                 self.log(f"Błąd: {str(e)}")
 
+    def get_all_dependent_tables(self, selected_tables):
+        """Zwraca wszystkie tabele zależne wymagane dla wybranych tabel"""
+        all_tables = set(selected_tables)
+        for table in selected_tables:
+            dependencies = self.get_parent_tables(table)
+            all_tables.update(dependencies)
+        return list(all_tables)
+
+    def get_parent_tables(self, table):
+        """Zwraca wszystkie tabele nadrzędne dla danej tabeli"""
+        parents = set()
+        for (child_table, _), (parent_table, _) in self.foreign_keys.items():
+            if child_table == table:
+                parents.add(parent_table)
+                parents.update(self.get_parent_tables(parent_table))
+        return parents
+
+    def ensure_minimum_records(self, table):
+        """Gwarantuje minimum 100 rekordów w tabelach nadrzędnych"""
+        if self.get_record_count(table) < 100:
+            self.log(f"Automatyczne generowanie 100 rekordów dla {table}")
+            self.generate_table_data(table, 100, 10)
+
+    def get_record_count(self, table):
+        """Zwraca liczbę istniejących rekordów w tabeli"""
+        try:
+            self.cursor.execute(f"SELECT COUNT(*) FROM {table}")
+            return self.cursor.fetchone()[0]
+        except Exception as e:
+            self.log(f"Błąd sprawdzania danych w {table}: {str(e)}")
+            return 0
+
     def generate_value(self, table, column):
+        for (child_table, child_col), (parent_table, parent_col) in self.foreign_keys.items():
+            if child_table == table and child_col == column:
+                if parent_table not in self.generation_rules:
+                    self.generation_rules[parent_table] = {}
+
+                existing_ids = self.get_existing_ids(parent_table, parent_col)
+                generated_ids = self.generated_ids.get(parent_table, [])
+                all_ids = existing_ids + generated_ids
+
+                if not all_ids:
+                    self.log(f"Automatyczne generowanie danych dla {parent_table}")
+                    self.ensure_minimum_records(parent_table)
+                    existing_ids = self.get_existing_ids(parent_table, parent_col)
+                    generated_ids = self.generated_ids.get(parent_table, [])
+                    all_ids = existing_ids + generated_ids
+
+                if not all_ids:
+                    self.log(f"Krytyczny błąd: Brak danych w {parent_table} nawet po generowaniu!")
+                    return None
+
+                return random.choice(all_ids)
+
         key = (table.lower(), column.lower())
         if key in self.special_data:
             try:
@@ -401,6 +554,15 @@ class UniversalDataGenerator:
                     return None
 
         return self.generate_default_value(table, column)
+
+    def get_existing_ids(self, table, column):
+        """Pobiera istniejące ID z bazy danych"""
+        try:
+            self.cursor.execute(f"SELECT {column} FROM {table}")
+            return [row[0] for row in self.cursor.fetchall()]
+        except Exception as e:
+            self.log(f"Błąd pobierania ID z {table}.{column}: {str(e)}")
+            return []
 
     def generate_from_pattern(self, pattern):
         result = []
@@ -428,10 +590,6 @@ class UniversalDataGenerator:
             else:
                 result.append(char)
         return ''.join(result)
-
-    def generate_dependent_value(self, table, column, depends_on):
-        #TO DO: TUTAJ MUSZE DODAC ZALEZNOSCI ZEBY SIE LADNIE LACZYLO
-        return "Wartość zależna"
 
     def generate_default_value(self, table, column):
         col_info = next(c for c in self.tables[table] if c['name'] == column)
