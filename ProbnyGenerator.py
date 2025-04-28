@@ -1,3 +1,4 @@
+import time
 import tkinter as tk
 from collections import defaultdict
 from tkinter import ttk, messagebox, simpledialog, filedialog
@@ -30,6 +31,9 @@ class UniversalDataGenerator:
         self.auto_increment = defaultdict(dict)
         self.setup_ui()
         self.load_last_config()
+        self.generated_values_cache = defaultdict(set)
+        self.retry_limit = 500
+        self.initialize_pk_cache()
 
     def load_special_data(self, path):
         try:
@@ -42,6 +46,18 @@ class UniversalDataGenerator:
         except Exception as e:
             messagebox.showerror("Błąd", f"Błąd ładowania specjalnych danych: {str(e)}")
             return {}
+
+    def initialize_pk_cache(self):
+        if self.conn:
+            try:
+                for table in self.tables:
+                    if table in self.primary_keys:
+                        pk_col = self.primary_keys[table][0]
+                        self.cursor.execute(f"SELECT {pk_col} FROM {table}")
+                        existing_ids = [str(row[0]) for row in self.cursor.fetchall()]
+                        self.generated_values_cache[(table, pk_col)].update(existing_ids)
+            except Exception as e:
+                self.log(f"Błąd inicjalizacji cache PK: {str(e)}")
 
     def setup_ui(self):
         self.notebook = ttk.Notebook(self.root)
@@ -106,25 +122,103 @@ class UniversalDataGenerator:
         tab = ttk.Frame(self.notebook)
         self.notebook.add(tab, text="Generacja")
 
-        frame = ttk.LabelFrame(tab, text="Parametry generacji")
-        frame.pack(fill=tk.X, padx=10, pady=5)
+        main_frame = ttk.Frame(tab)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        ttk.Label(frame, text="Liczba rekordów:").grid(row=0, column=0, sticky=tk.W)
-        self.records_entry = ttk.Entry(frame, width=10)
-        self.records_entry.grid(row=0, column=1)
+
+        left_frame = ttk.Frame(main_frame)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+
+        ttk.Label(left_frame, text="Wybierz tabele do generowania:").pack(anchor=tk.W)
+
+        self.tables_tree = ttk.Treeview(left_frame, columns=("count"), show="tree headings", selectmode="extended")
+        self.tables_tree.heading("#0", text="Tabela")
+        self.tables_tree.heading("count", text="Ilość rekordów")
+        self.tables_tree.column("count", width=100, anchor=tk.CENTER)
+        self.tables_tree.pack(fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(left_frame, orient="vertical", command=self.tables_tree.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tables_tree.configure(yscrollcommand=scrollbar.set)
+
+        right_frame = ttk.Frame(main_frame)
+        right_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=5)
+
+        ttk.Label(right_frame, text="Parametry:").pack()
+
+        self.global_count_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(right_frame, text="Globalna ilość rekordów",
+                        variable=self.global_count_var).pack(anchor=tk.W)
+
+        self.records_entry = ttk.Entry(right_frame, width=10)
+        self.records_entry.pack(pady=5)
         self.records_entry.insert(0, "100")
 
-        ttk.Label(frame, text="Rozmiar partii:").grid(row=0, column=2, sticky=tk.W)
-        self.batch_entry = ttk.Entry(frame, width=10)
-        self.batch_entry.grid(row=0, column=3)
+        ttk.Label(right_frame, text="Rozmiar partii:").pack()
+        self.batch_entry = ttk.Entry(right_frame, width=10)
+        self.batch_entry.pack(pady=5)
         self.batch_entry.insert(0, "10")
 
-        ttk.Button(frame, text="Generuj dane", command=self.generate_data).grid(row=0, column=4, padx=5)
+        btn_frame = ttk.Frame(right_frame)
+        btn_frame.pack(pady=10)
 
-        self.log_text = tk.Text(tab, height=15, state=tk.DISABLED)
+        ttk.Button(btn_frame, text="Zaznacz wszystkie",
+                   command=self.select_all_tables).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Odznacz wszystkie",
+                   command=self.deselect_all_tables).pack(side=tk.LEFT, padx=2)
+
+        ttk.Button(right_frame, text="Generuj dane",
+                   command=self.generate_data).pack(pady=10)
+
+        self.tables_tree.bind("<Double-1>", self.on_table_double_click)
+
+        self.log_text = tk.Text(tab, height=10, state=tk.DISABLED)
         self.log_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        ttk.Button(tab, text="Wyczyść log", command=self.clear_log).pack(side=tk.RIGHT, padx=10, pady=5)
+        ttk.Button(tab, text="Wyczyść log",
+                   command=self.clear_log).pack(side=tk.RIGHT, padx=10, pady=5)
+
+    def on_table_double_click(self, event):
+        """Obsługa edycji ilości rekordów przez podwójne kliknięcie"""
+        region = self.tables_tree.identify("region", event.x, event.y)
+        if region == "cell":
+            column = self.tables_tree.identify_column(event.x)
+            if column == "#1":
+                item = self.tables_tree.identify_row(event.y)
+                x, y, width, height = self.tables_tree.bbox(item, column)
+
+                entry = ttk.Entry(self.tables_tree)
+                entry.place(x=x, y=y, width=width, height=height)
+                entry.insert(0, self.tables_tree.item(item, "values")[0])
+                entry.select_range(0, tk.END)
+                entry.focus_set()
+
+                def save_edit():
+                    self.tables_tree.set(item, column, entry.get())
+                    entry.destroy()
+
+                entry.bind("<FocusOut>", lambda e: save_edit())
+                entry.bind("<Return>", lambda e: save_edit())
+
+    def toggle_global_count(self):
+        state = 'normal' if not self.global_count_var.get() else 'disabled'
+        for child in self.tables_tree.get_children():
+            entry = self.tables_tree.set(child, 'count')
+            if isinstance(entry, ttk.Entry):
+                entry.configure(state=state)
+
+    def select_all_tables(self):
+        for table in self.tables:
+            self.tables_tree.selection_add(table)
+
+    def deselect_all_tables(self):
+        self.tables_tree.selection_remove(self.tables_tree.selection())
+
+    def update_tables_list(self):
+        """Aktualizuje listę dostępnych tabel"""
+        self.tables_tree.delete(*self.tables_tree.get_children())
+        for table in sorted(self.tables.keys()):
+            self.tables_tree.insert("", "end", iid=table, text=table, values=("100",))
 
     def setup_patterns_tab(self):
         tab = ttk.Frame(self.notebook)
@@ -181,6 +275,22 @@ class UniversalDataGenerator:
         except Exception as e:
             messagebox.showerror("Błąd połączenia", str(e))
 
+    def generate_unique_value(self, table, column, generator):
+        """Generuje unikalne wartości z uwzględnieniem istniejących danych"""
+        for _ in range(self.retry_limit):
+            value = generator()
+
+            if value not in self.generated_values_cache[(table, column)]:
+                query = sql.SQL("SELECT EXISTS(SELECT 1 FROM {} WHERE {} = %s)").format(
+                    sql.Identifier(table),
+                    sql.Identifier(column)
+                )
+                self.cursor.execute(query, (value,))
+                if not self.cursor.fetchone()[0]:
+                    self.generated_values_cache[(table, column)].add(value)
+                    return value
+        raise ValueError(f"Nie udało się wygenerować unikalnej wartości dla {table}.{column}")
+
     def load_table_metadata(self):
         """Ładuje metadane o kluczach głównych, obcych i zależnościach"""
         try:
@@ -214,12 +324,13 @@ class UniversalDataGenerator:
                 self.table_dependencies[parent_table].append(child_table)
 
             self.cursor.execute("""
-                SELECT table_name, column_name
-                FROM information_schema.columns
-                WHERE column_default LIKE 'nextval(%'
-                    AND table_schema = 'public'
-            """)
+                        SELECT table_name, column_name 
+                        FROM information_schema.columns 
+                        WHERE column_default LIKE 'nextval(%'
+                    """)
             for table, column in self.cursor.fetchall():
+                if table not in self.auto_increment:
+                    self.auto_increment[table] = {}
                 self.auto_increment[table][column] = True
 
         except Exception as e:
@@ -273,6 +384,7 @@ class UniversalDataGenerator:
                 })
                 self.tree.insert(current_table, "end", text=column, values=(dtype, max_len, nullable))
 
+            self.update_tables_list()
             self.log("Załadowano strukturę tabel")
         except Exception as e:
             messagebox.showerror("Błąd", str(e))
@@ -415,21 +527,41 @@ class UniversalDataGenerator:
             return
 
         try:
-            tables = list(self.generation_rules.keys())
-            all_tables = self.get_all_dependent_tables(tables)
+            selected_tables = self.tables_tree.selection()
+            if not selected_tables:
+                messagebox.showwarning("Brak wyboru", "Wybierz przynajmniej jedną tabelę!")
+                return
+
+            generation_config = {}
+            for table in selected_tables:
+                if self.global_count_var.get():
+                    count = int(self.records_entry.get())
+                else:
+                    count = int(self.tables_tree.item(table, "values")[0])
+                generation_config[table] = count
+
+            all_tables = self.get_all_dependent_tables(generation_config.keys())
             sorted_tables = self.topological_sort(all_tables)
 
             for table in sorted_tables:
-                if table not in self.generation_rules:
-                    self.ensure_minimum_records(table)
-                else:
-                    count = int(self.records_entry.get())
-                    batch_size = int(self.batch_entry.get())
+                count = generation_config.get(table, 100)
+                batch_size = int(self.batch_entry.get())
+
+                if table in self.generation_rules:
+                    self.log(f"Generowanie {count} rekordów dla {table} (skonfigurowana)")
                     self.generate_table_data(table, count, batch_size)
+                else:
+                    self.log(f"Generowanie {count} rekordów dla {table} (domyślna)")
+                    self.generate_default_table_data(table, count, batch_size)
 
             messagebox.showinfo("Sukces", "Dane wygenerowane!")
         except Exception as e:
             messagebox.showerror("Błąd", str(e))
+            self.log(f"Błąd generowania: {str(e)}")
+
+    def generate_pesel(self):
+        """Generuje unikalny numer PESEL z kontrolą istniejących wartości"""
+        return self.generate_unique_value('pacjenci', 'pesel', self.faker.pesel)
 
     def generate_table_data(self, table, count, batch_size):
         columns = []
@@ -456,25 +588,177 @@ class UniversalDataGenerator:
         for i in range(0, count, batch_size):
             current_batch = min(batch_size, count - i)
             batch = []
-            for _ in range(current_batch):
-                row = [self.generate_value(table, col) for col in columns]
-                batch.append(row)
+            records_to_remove = []
+
+            for idx in range(current_batch):
+                try:
+                    row = [self.generate_value(table, col) for col in columns]
+                    if table in self.primary_keys and not self.auto_increment.get(table, {}).get(
+                            self.primary_keys[table][0], False):
+                        pk_value = row[self.primary_keys[table].index(self.primary_keys[table][0])]
+                        if pk_value in self.generated_values_cache[(table, self.primary_keys[table][0])]:
+                            raise ValueError(f"Duplikat PK {pk_value} w batchu")
+                    batch.append(row)
+                except ValueError as e:
+                    self.log(str(e))
+                    records_to_remove.append(idx)
+                    continue
+
+            for idx in reversed(records_to_remove):
+                del batch[idx]
+
+            if not batch:
+                continue
 
             try:
                 if returning:
                     ids = []
                     for record in batch:
                         self.cursor.execute(query, record)
-                        ids.append(self.cursor.fetchone()[0])
+                        new_id = self.cursor.fetchone()[0]
+                        ids.append(new_id)
+                        if 'id_pacjenta' in columns:
+                            self.generated_values_cache[(table, 'id_pacjenta')].add(new_id)
                     self.generated_ids[table].extend(ids)
                 else:
                     self.cursor.executemany(query, batch)
 
                 self.conn.commit()
-                self.log(f"Dodano {len(batch)} rekordów do {table}")
-            except Exception as e:
+                success_count = len(batch)
+                self.log(f"Dodano {success_count} rekordów do {table}")
+
+                if len(batch) < current_batch:
+                    diff = current_batch - len(batch)
+                    self.generate_table_data(table, diff, diff)
+
+            except psycopg2.IntegrityError as e:
                 self.conn.rollback()
-                self.log(f"Błąd: {str(e)}")
+                self.handle_integrity_error(e, table, columns, batch)
+
+    def handle_integrity_error(self, error, table, columns, batch):
+        error_msg = str(error).split('\n')[0]
+        self.log(f"Błąd integralności: {error_msg}")
+
+        if "pacjenci_pkey" in error_msg:
+            self.handle_primary_key_error(table, columns, batch)
+        elif "pacjenci_pesel_key" in error_msg:
+            self.handle_pesel_error(table, columns, batch)
+
+    def handle_primary_key_error(self, table, columns, batch):
+        pk_column = self.primary_keys[table][0]
+        self.log(f"Wykryto duplikat klucza głównego w {table}.{pk_column}, próba regeneracji...")
+
+        pk_index = columns.index(pk_column)
+        for record in batch:
+            existing_id = record[pk_index]
+            self.generated_values_cache[(table, pk_column)].discard(existing_id)
+
+        new_batch = []
+        for record in batch:
+            try:
+                new_record = list(record)
+                new_record[pk_index] = self.generate_value(table, pk_column)
+                new_batch.append(new_record)
+            except ValueError as e:
+                self.log(str(e))
+
+        if new_batch:
+            try:
+                self.cursor.executemany(
+                    sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+                        sql.Identifier(table),
+                        sql.SQL(', ').join(map(sql.Identifier, columns)),
+                        sql.SQL(', ').join([sql.Placeholder()] * len(columns))
+                    ),
+                    new_batch
+                )
+                self.conn.commit()
+                self.log(f"Pomyślnie dodano {len(new_batch)} rekordów po regeneracji PK")
+            except psycopg2.Error as e:
+                self.conn.rollback()
+                self.log(f"Błąd przy ponownym wstawianiu: {str(e)}")
+
+    def handle_pesel_error(self, table, columns, batch):
+        pesel_index = columns.index('pesel')
+        self.log("Wykryto duplikat PESEL, próba regeneracji...")
+
+        for record in batch:
+            existing_pesel = record[pesel_index]
+            self.generated_values_cache[(table, 'pesel')].discard(existing_pesel)
+
+        new_batch = []
+        for record in batch:
+            try:
+                new_record = list(record)
+                new_record[pesel_index] = self.generate_pesel()
+                new_batch.append(new_record)
+            except ValueError as e:
+                self.log(str(e))
+
+        if new_batch:
+            self.cursor.executemany(
+                sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+                    sql.Identifier(table),
+                    sql.SQL(', ').join(map(sql.Identifier, columns)),
+                    sql.SQL(', ').join([sql.Placeholder()] * len(columns))
+                ),
+                new_batch
+            )
+            self.conn.commit()
+            self.log(f"Pomyślnie dodano {len(new_batch)} rekordów po regeneracji PESEL")
+
+    def generate_default_table_data(self, table, count, batch_size):
+        """Generuje dane dla tabeli bez specjalnej konfiguracji"""
+        try:
+            columns = []
+            returning = None
+
+            if table in self.primary_keys:
+                pk = self.primary_keys[table][0]
+                if self.auto_increment.get(table, {}).get(pk, False):
+                    columns = [col['name'] for col in self.tables[table] if col['name'] != pk]
+                    returning = pk
+                else:
+                    columns = [col['name'] for col in self.tables[table]]
+            else:
+                columns = [col['name'] for col in self.tables[table]]
+
+            query = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+                sql.Identifier(table),
+                sql.SQL(', ').join(map(sql.Identifier, columns)),
+                sql.SQL(', ').join([sql.Placeholder()] * len(columns))
+            )
+
+            if returning:
+                query += sql.SQL(" RETURNING {}").format(sql.Identifier(returning))
+
+            for i in range(0, count, batch_size):
+                current_batch = min(batch_size, count - i)
+                batch = []
+                for _ in range(current_batch):
+                    row = [self.generate_value(table, col) for col in columns]
+                    batch.append(row)
+
+                try:
+                    if returning:
+                        ids = []
+                        for record in batch:
+                            self.cursor.execute(query, record)
+                            ids.append(self.cursor.fetchone()[0])
+                        self.generated_ids[table].extend(ids)
+                    else:
+                        self.cursor.executemany(query, batch)
+
+                    self.conn.commit()
+                    self.log(f"Dodano {len(batch)} rekordów do {table}")
+                except Exception as e:
+                    self.conn.rollback()
+                    self.log(f"Błąd: {str(e)}")
+                    raise
+
+        except Exception as e:
+            self.log(f"Krytyczny błąd generowania {table}: {str(e)}")
+            raise
 
     def get_all_dependent_tables(self, selected_tables):
         """Zwraca wszystkie tabele zależne wymagane dla wybranych tabel"""
@@ -509,6 +793,19 @@ class UniversalDataGenerator:
             return 0
 
     def generate_value(self, table, column):
+        self.faker.seed_instance(int(time.time() * 1000 % 10000))
+        if column.lower() == "imie":
+            return self.faker.first_name()[:self.column_lengths_cache.get(table, {}).get(column, 50)]
+        elif column.lower() == "nazwisko":
+            return self.faker.last_name()[:self.column_lengths_cache.get(table, {}).get(column, 50)]
+        if (table.lower(), column.lower()) == ('pacjenci', 'pesel'):
+            return self.generate_pesel()
+        if table in self.primary_keys and column in self.primary_keys[table]:
+            if not self.auto_increment.get(table, {}).get(column, False):
+                def pk_generator():
+                    return random.randint(1, 2147483647)
+                return self.generate_unique_value(table, column, pk_generator)
+
         for (child_table, child_col), (parent_table, parent_col) in self.foreign_keys.items():
             if child_table == table and child_col == column:
                 if parent_table not in self.generation_rules:
@@ -594,7 +891,7 @@ class UniversalDataGenerator:
     def generate_default_value(self, table, column):
         col_info = next(c for c in self.tables[table] if c['name'] == column)
         if col_info['type'] in ['integer', 'bigint']:
-            return random.randint(1, 1000)
+            return random.randint(1, 2147483647)
         elif col_info['type'] in ['varchar', 'text']:
             max_len = col_info['max_length'] or 50
             return self.faker.text(max_nb_chars=max_len)[:max_len]
