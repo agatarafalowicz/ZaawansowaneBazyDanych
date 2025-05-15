@@ -1,5 +1,8 @@
+import secrets
 import time
+import re
 import tkinter as tk
+import uuid
 from collections import defaultdict
 from tkinter import ttk, messagebox, simpledialog, filedialog
 import psycopg2
@@ -7,7 +10,9 @@ from psycopg2 import sql
 from faker import Faker
 import random
 import BasicDataGenerator
+import SpecialDataGenerator
 from datetime import datetime
+
 
 
 class UniversalDataGenerator:
@@ -34,6 +39,15 @@ class UniversalDataGenerator:
         self.generated_values_cache = defaultdict(set)
         self.retry_limit = 500
         self.initialize_pk_cache()
+        self.special_generators = {
+            'PESEL': lambda param: SpecialDataGenerator.PeselGenerator(param),
+            'VIN': SpecialDataGenerator.VinGenerator
+        }
+        current_seed = int(time.time() * 1000)
+        random.seed(current_seed)
+        Faker.seed(current_seed)
+
+
 
     def load_special_data(self, path):
         try:
@@ -50,14 +64,42 @@ class UniversalDataGenerator:
     def initialize_pk_cache(self):
         if self.conn:
             try:
-                for table in self.tables:
-                    if table in self.primary_keys:
-                        pk_col = self.primary_keys[table][0]
-                        self.cursor.execute(f"SELECT {pk_col} FROM {table}")
-                        existing_ids = [str(row[0]) for row in self.cursor.fetchall()]
-                        self.generated_values_cache[(table, pk_col)].update(existing_ids)
+                self.cursor.execute("""
+                    SELECT table_name, column_name 
+                    FROM information_schema.key_column_usage 
+                    WHERE constraint_name LIKE '%pkey'
+                """)
+                for table, column in self.cursor.fetchall():
+                    self._load_existing_values(table, column)
+
+                self.cursor.execute("""
+                    SELECT table_name, column_name 
+                    FROM information_schema.key_column_usage 
+                    WHERE constraint_name IN (
+                        SELECT constraint_name 
+                        FROM information_schema.table_constraints 
+                        WHERE constraint_type = 'UNIQUE'
+                    )
+                """)
+                for table, column in self.cursor.fetchall():
+                    self._load_existing_values(table, column)
+
             except Exception as e:
-                self.log(f"Błąd inicjalizacji cache PK: {str(e)}")
+                self.log(f"Błąd inicjalizacji cache: {str(e)}")
+
+    def _load_existing_values(self, table, column):
+        try:
+            self.cursor.execute(
+                sql.SQL("SELECT {} FROM {}").format(
+                    sql.Identifier(column),
+                    sql.Identifier(table)
+                )
+            )
+            existing = {str(r[0]) for r in self.cursor.fetchall()}
+            self.generated_values_cache[(table, column)] = existing
+            self.log(f"Zainicjowano cache dla {table}.{column}: {len(existing)} rekordów")
+        except Exception as e:
+            self.log(f"Błąd ładowania wartości dla {table}.{column}: {str(e)}")
 
     def setup_ui(self):
         self.notebook = ttk.Notebook(self.root)
@@ -275,8 +317,9 @@ class UniversalDataGenerator:
         except Exception as e:
             messagebox.showerror("Błąd połączenia", str(e))
 
+    """
     def generate_unique_value(self, table, column, generator):
-        """Generuje unikalne wartości z uwzględnieniem istniejących danych"""
+        Generuje unikalne wartości z uwzględnieniem istniejących danych
         for _ in range(self.retry_limit):
             value = generator()
 
@@ -290,6 +333,7 @@ class UniversalDataGenerator:
                     self.generated_values_cache[(table, column)].add(value)
                     return value
         raise ValueError(f"Nie udało się wygenerować unikalnej wartości dla {table}.{column}")
+    """
 
     def load_table_metadata(self):
         """Ładuje metadane o kluczach głównych, obcych i zależnościach"""
@@ -560,89 +604,73 @@ class UniversalDataGenerator:
             self.log(f"Błąd generowania: {str(e)}")
 
     def generate_pesel(self):
-        """Generuje unikalny numer PESEL z kontrolą istniejących wartości"""
-        return self.generate_unique_value('pacjenci', 'pesel', self.faker.pesel)
+        return str(SpecialDataGenerator.PeselGenerator('PESEL'))
 
-    def generate_table_data(self, table, count, batch_size):
-        columns = []
-        returning = None
-        if table in self.primary_keys:
-            pk = self.primary_keys[table][0]
-            if self.auto_increment.get(table, {}).get(pk, False):
-                columns = [col['name'] for col in self.tables[table] if col['name'] != pk]
-                returning = pk
-            else:
-                columns = [col['name'] for col in self.tables[table]]
-        else:
-            columns = [col['name'] for col in self.tables[table]]
 
-        query = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
-            sql.Identifier(table),
-            sql.SQL(', ').join(map(sql.Identifier, columns)),
-            sql.SQL(', ').join([sql.Placeholder()] * len(columns))
-        )
 
-        if returning:
-            query += sql.SQL(" RETURNING {}").format(sql.Identifier(returning))
+    def pk_exists(self, table, pk_column, value):
+        """Sprawdza istnienie wartości PK w cache'u i bazie danych"""
+        if str(value) in self.generated_values_cache.get((table, pk_column), set()):
+            return True
 
-        for i in range(0, count, batch_size):
-            current_batch = min(batch_size, count - i)
-            batch = []
-            records_to_remove = []
-
-            for idx in range(current_batch):
-                try:
-                    row = [self.generate_value(table, col) for col in columns]
-                    if table in self.primary_keys and not self.auto_increment.get(table, {}).get(
-                            self.primary_keys[table][0], False):
-                        pk_value = row[self.primary_keys[table].index(self.primary_keys[table][0])]
-                        if pk_value in self.generated_values_cache[(table, self.primary_keys[table][0])]:
-                            raise ValueError(f"Duplikat PK {pk_value} w batchu")
-                    batch.append(row)
-                except ValueError as e:
-                    self.log(str(e))
-                    records_to_remove.append(idx)
-                    continue
-
-            for idx in reversed(records_to_remove):
-                del batch[idx]
-
-            if not batch:
-                continue
-
-            try:
-                if returning:
-                    ids = []
-                    for record in batch:
-                        self.cursor.execute(query, record)
-                        new_id = self.cursor.fetchone()[0]
-                        ids.append(new_id)
-                        if 'id_pacjenta' in columns:
-                            self.generated_values_cache[(table, 'id_pacjenta')].add(new_id)
-                    self.generated_ids[table].extend(ids)
-                else:
-                    self.cursor.executemany(query, batch)
-
-                self.conn.commit()
-                success_count = len(batch)
-                self.log(f"Dodano {success_count} rekordów do {table}")
-
-                if len(batch) < current_batch:
-                    diff = current_batch - len(batch)
-                    self.generate_table_data(table, diff, diff)
-
-            except psycopg2.IntegrityError as e:
-                self.conn.rollback()
-                self.handle_integrity_error(e, table, columns, batch)
+        try:
+            self.cursor.execute(
+                sql.SQL("SELECT EXISTS (SELECT 1 FROM {} WHERE {} = %s)").format(
+                    sql.Identifier(table),
+                    sql.Identifier(pk_column)
+                ),
+                (value,)
+            )
+            return self.cursor.fetchone()[0]
+        except Exception as e:
+            self.log(f"Błąd sprawdzania PK: {str(e)}")
+            return False
 
     def handle_integrity_error(self, error, table, columns, batch):
-        error_msg = str(error).split('\n')[0]
-        self.log(f"Błąd integralności: {error_msg}")
+        """Obsługuje błędy integralności i próbuje regenerować dane"""
+        error_msg = str(error)
+        self.log(f"BŁĄD INTEGRALNOŚCI: {error_msg}")
+        if "null value in column" in error_msg:
+            col_name = re.search(r'column "(.*?)"', error_msg).group(1)
+            self.log(f"Próbuję poprawić NULL w kolumnie {col_name}...")
+            self.regenerate_null_values(table, col_name, batch, columns)
+            self.generate_table_data(table, len(batch), len(batch))
 
-        if "pacjenci_pkey" in error_msg:
-            self.handle_primary_key_error(table, columns, batch)
-        elif "pacjenci_pesel_key" in error_msg:
-            self.handle_pesel_error(table, columns, batch)
+        elif "duplicate key value" in error_msg:
+            match = re.search(r'Key \((.*?)\)=\((.*?)\)', error_msg)
+            if match:
+                pk_col = match.group(1)
+                pk_value = match.group(2)
+                self.log(f"Duplikat klucza głównego {pk_col}={pk_value}")
+                self.generated_values_cache[(table, pk_col)].discard(pk_value)
+                self.generate_table_data(table, 1, 1)  # Regeneruj pojedynczy rekord
+
+        elif "foreign key constraint" in error_msg:
+            match = re.search(r'Key \((.*?)\)=\((.*?)\)', error_msg)
+            if match:
+                fk_col = match.group(1)
+                fk_value = match.group(2)
+                parent_table = [v[0] for k, v in self.foreign_keys.items() if k == (table, fk_col)][0]
+                self.log(f"Brak wartości {fk_value} w tabeli {parent_table}.{fk_col}")
+                self.ensure_minimum_records(parent_table)
+                self.generate_table_data(table, len(batch), len(batch))
+
+        else:
+            self.log(f"Nierozpoznany błąd integralności: {error_msg}")
+            raise
+
+    def regenerate_null_values(self, table, column, batch, columns):
+        """Regeneruje wartości NULL w istniejącym batchu"""
+        col_index = columns.index(column)
+        for record in batch:
+            if record[col_index] is None:
+                try:
+                    new_value = self.generate_value(table, column)
+                    record[col_index] = new_value
+                    self.log(f"Wygenerowano nową wartość dla {table}.{column}: {new_value}")
+                except Exception as e:
+                    record[col_index] = self.generate_default_value(table, column)
+                    self.log(f"Wykorzystano wartość domyślną dla {table}.{column}: {record[col_index]}")
 
     def handle_primary_key_error(self, table, columns, batch):
         pk_column = self.primary_keys[table][0]
@@ -678,34 +706,6 @@ class UniversalDataGenerator:
                 self.conn.rollback()
                 self.log(f"Błąd przy ponownym wstawianiu: {str(e)}")
 
-    def handle_pesel_error(self, table, columns, batch):
-        pesel_index = columns.index('pesel')
-        self.log("Wykryto duplikat PESEL, próba regeneracji...")
-
-        for record in batch:
-            existing_pesel = record[pesel_index]
-            self.generated_values_cache[(table, 'pesel')].discard(existing_pesel)
-
-        new_batch = []
-        for record in batch:
-            try:
-                new_record = list(record)
-                new_record[pesel_index] = self.generate_pesel()
-                new_batch.append(new_record)
-            except ValueError as e:
-                self.log(str(e))
-
-        if new_batch:
-            self.cursor.executemany(
-                sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
-                    sql.Identifier(table),
-                    sql.SQL(', ').join(map(sql.Identifier, columns)),
-                    sql.SQL(', ').join([sql.Placeholder()] * len(columns))
-                ),
-                new_batch
-            )
-            self.conn.commit()
-            self.log(f"Pomyślnie dodano {len(new_batch)} rekordów po regeneracji PESEL")
 
     def generate_default_table_data(self, table, count, batch_size):
         """Generuje dane dla tabeli bez specjalnej konfiguracji"""
@@ -783,6 +783,76 @@ class UniversalDataGenerator:
             self.log(f"Automatyczne generowanie 100 rekordów dla {table}")
             self.generate_table_data(table, 100, 10)
 
+    def generate_table_data(self, table, count, batch_size):
+        columns = []
+        returning = None
+        if table in self.primary_keys:
+            pk = self.primary_keys[table][0]
+            if self.auto_increment.get(table, {}).get(pk, False):
+                columns = [col['name'] for col in self.tables[table] if col['name'] != pk]
+                returning = pk
+            else:
+                columns = [col['name'] for col in self.tables[table]]
+        else:
+            columns = [col['name'] for col in self.tables[table]]
+
+        query = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+            sql.Identifier(table),
+            sql.SQL(', ').join(map(sql.Identifier, columns)),
+            sql.SQL(', ').join([sql.Placeholder()] * len(columns))
+        )
+
+        if returning:
+            query += sql.SQL(" RETURNING {}").format(sql.Identifier(returning))
+
+        for i in range(0, count, batch_size):
+            current_batch = min(batch_size, count - i)
+            batch = []
+            records_to_remove = []
+
+            for idx in range(current_batch):
+                try:
+                    row = [self.generate_value(table, col) for col in columns]
+                    if table in self.primary_keys and not self.auto_increment.get(table, {}).get(
+                            self.primary_keys[table][0], False):
+                        pk_value = row[self.primary_keys[table].index(self.primary_keys[table][0])]
+                        if pk_value in self.generated_values_cache[(table, self.primary_keys[table][0])]:
+                            raise ValueError(f"Duplikat PK {pk_value} w batchu")
+                    batch.append(row)
+                except ValueError as e:
+                    self.log(str(e))
+                    records_to_remove.append(idx)
+                    continue
+
+            for idx in reversed(records_to_remove):
+                del batch[idx]
+
+            if not batch:
+                continue
+
+            try:
+                if returning:
+                    ids = []
+                    for record in batch:
+                        self.cursor.execute(query, record)
+                        new_id = self.cursor.fetchone()[0]
+                        ids.append(new_id)
+                    self.generated_ids[table].extend(ids)
+                else:
+                    self.cursor.executemany(query, batch)
+
+                self.conn.commit()
+                success_count = len(batch)
+                self.log(f"Dodano {success_count} rekordów do {table}")
+
+                if len(batch) < current_batch:
+                    diff = current_batch - len(batch)
+                    self.generate_table_data(table, diff, diff)
+
+            except psycopg2.IntegrityError as e:
+                self.conn.rollback()
+                self.handle_integrity_error(e, table, columns, batch)
+
     def get_record_count(self, table):
         """Zwraca liczbę istniejących rekordów w tabeli"""
         try:
@@ -793,64 +863,109 @@ class UniversalDataGenerator:
             return 0
 
     def generate_value(self, table, column):
-        self.faker.seed_instance(int(time.time() * 1000 % 10000))
-        if column.lower() == "imie":
-            return self.faker.first_name()[:self.column_lengths_cache.get(table, {}).get(column, 50)]
-        elif column.lower() == "nazwisko":
-            return self.faker.last_name()[:self.column_lengths_cache.get(table, {}).get(column, 50)]
-        if (table.lower(), column.lower()) == ('pacjenci', 'pesel'):
-            return self.generate_pesel()
-        if table in self.primary_keys and column in self.primary_keys[table]:
-            if not self.auto_increment.get(table, {}).get(column, False):
-                def pk_generator():
-                    return random.randint(1, 2147483647)
-                return self.generate_unique_value(table, column, pk_generator)
+        """Generuje wartość dla kolumny z uwzględnieniem wszystkich reguł i zależności"""
+        local_seed = secrets.randbits(64)
+        local_random = random.Random(local_seed)
+        Faker.seed(local_seed)
 
-        for (child_table, child_col), (parent_table, parent_col) in self.foreign_keys.items():
-            if child_table == table and child_col == column:
-                if parent_table not in self.generation_rules:
-                    self.generation_rules[parent_table] = {}
-
-                existing_ids = self.get_existing_ids(parent_table, parent_col)
-                generated_ids = self.generated_ids.get(parent_table, [])
-                all_ids = existing_ids + generated_ids
-
-                if not all_ids:
-                    self.log(f"Automatyczne generowanie danych dla {parent_table}")
-                    self.ensure_minimum_records(parent_table)
-                    existing_ids = self.get_existing_ids(parent_table, parent_col)
-                    generated_ids = self.generated_ids.get(parent_table, [])
-                    all_ids = existing_ids + generated_ids
-
-                if not all_ids:
-                    self.log(f"Krytyczny błąd: Brak danych w {parent_table} nawet po generowaniu!")
-                    return None
-
-                return random.choice(all_ids)
-
-        key = (table.lower(), column.lower())
-        if key in self.special_data:
-            try:
-                return BasicDataGenerator.GenerateData(self.special_data[key])
-            except Exception as e:
-                self.log(f"Błąd specjalnego generatora: {str(e)}")
-
-        if table in self.generation_rules and column in self.generation_rules[table]:
-            rule = self.generation_rules[table][column]
-            if rule['type'] == "custom":
-                return random.choice(rule['values'])
-            elif rule['type'] == "pattern":
-                return self.generate_from_pattern(rule['pattern'])
-            elif rule['type'] == "dependent":
-                return self.generate_dependent_value(table, column, rule['depends_on'])
-            elif rule['type'] == "function":
+        try:
+            key = (table.lower(), column.lower())
+            if key in self.special_data:
                 try:
-                    return eval(rule['function'], {'fake': self.faker, 'random': random})
-                except Exception as e:
-                    self.log(f"Błąd funkcji: {str(e)}")
-                    return None
+                    parts = self.special_data[key].split(':')
+                    print(f"parts to {parts}")
+                    if len(parts) >= 2 and parts[0].startswith("*"):
+                        generator_type = parts[0][1:]
+                        print(f"generator_type to {generator_type}")
+                        param = parts[1]
+                        if generator_type == 'PESEL':
+                            for attempt in range(self.retry_limit):
+                                pesel = SpecialDataGenerator.PeselGenerator(param)
+                                cache_key = (table, column)
 
-        return self.generate_default_value(table, column)
+                                in_cache = pesel in self.generated_values_cache.get(cache_key, set())
+                                in_db = self.check_pesel_in_db(pesel)
+
+                                if not in_cache and not in_db:
+                                    self.generated_values_cache[cache_key].add(pesel)
+                                    print(pesel)
+                                    BasicDataGenerator.ClearSpecialValues()
+                                    return pesel
+
+                                else:
+                                    BasicDataGenerator.ClearSpecialValues()
+                                    new_seed = secrets.randbits(64)
+                                    local_random.seed(new_seed)
+                                    Faker.seed(new_seed)
+
+                            raise ValueError(
+                                f"Nie udało się wygenerować unikalnego PESEL po {self.retry_limit} próbach")
+
+
+
+                except Exception as e:
+                    self.log(f"Błąd specjalnego generatora {table}.{column}: {str(e)}")
+                    raise
+
+            for (child_table, child_col), (parent_table, parent_col) in self.foreign_keys.items():
+                if child_table == table and child_col == column:
+                    try:
+                        parent_ids = self.get_existing_ids(parent_table, parent_col)
+                        if not parent_ids:
+                            self.ensure_minimum_records(parent_table)
+                            parent_ids = self.get_existing_ids(parent_table, parent_col)
+                        return local_random.choice(parent_ids)
+                    except Exception as e:
+                        self.log(f"Błąd klucza obcego {table}.{column}: {str(e)}")
+                        raise
+
+            if table in self.generation_rules and column in self.generation_rules[table]:
+                rule = self.generation_rules[table][column]
+                if rule['type'] == "custom":
+                    return local_random.choice(rule['values'])
+                elif rule['type'] == "pattern":
+                    return self.generate_from_pattern(rule['pattern'], local_random)
+                elif rule['type'] == "dependent":
+                    return self.generate_dependent_value(table, column, rule['depends_on'])
+                elif rule['type'] == "function":
+                    try:
+                        return eval(rule['function'], {
+                            'fake': self.faker,
+                            'random': local_random,
+                            'secrets': secrets
+                        })
+                    except Exception as e:
+                        self.log(f"Błąd funkcji: {str(e)}")
+                        raise ValueError("Nieprawidłowa funkcja generująca")
+
+            return self.generate_default_value(table, column)
+
+        except Exception as e:
+            self.log(f"Krytyczny błąd generowania {table}.{column}: {str(e)}")
+            raise
+
+    def check_pesel_in_db(self, pesel):
+        try:
+            self.cursor.execute(
+                "SELECT EXISTS(SELECT 1 FROM pacjenci WHERE pesel = %s)",
+                (pesel,)
+            )
+            return self.cursor.fetchone()[0]
+        except Exception as e:
+            self.log(f"Błąd sprawdzania PESEL: {str(e)}")
+            return True
+
+
+    def generate_default_pk_value(self, table, column):
+        """Generuje domyślną wartość PK na podstawie typu"""
+        col_info = next(c for c in self.tables[table] if c['name'] == column)
+
+        if col_info['type'] in ['integer', 'bigint']:
+            return random.randint(1, 2147483647)
+        elif col_info['type'] in ['varchar', 'text']:
+            return str(uuid.uuid4())
+        else:
+            raise ValueError(f"Nieobsługiwany typ PK: {col_info['type']}")
 
     def get_existing_ids(self, table, column):
         """Pobiera istniejące ID z bazy danych"""
@@ -889,17 +1004,32 @@ class UniversalDataGenerator:
         return ''.join(result)
 
     def generate_default_value(self, table, column):
+        """Generuje bezpieczną wartość domyślną na podstawie typu kolumny"""
         col_info = next(c for c in self.tables[table] if c['name'] == column)
+
         if col_info['type'] in ['integer', 'bigint']:
             return random.randint(1, 2147483647)
-        elif col_info['type'] in ['varchar', 'text']:
+
+        elif col_info['type'] in ['character varying', 'text']:
             max_len = col_info['max_length'] or 50
-            return self.faker.text(max_nb_chars=max_len)[:max_len]
+            return self.faker.text(max_nb_chars=max_len)[:max_len].replace("'", "")
+
         elif col_info['type'] == 'date':
-            return self.faker.date_this_decade()
+            return self.faker.date_between(start_date='-30y', end_date='today')
+
         elif col_info['type'] == 'boolean':
             return random.choice([True, False])
-        return None
+
+        elif col_info['type'] in ['numeric', 'real']:
+            return round(random.uniform(1.0, 1000.0), 2)
+
+        elif col_info['type'] == 'timestamp without time zone':
+            return self.faker.date_time_this_decade()
+
+        elif col_info['type'] == 'time without time zone':
+            return self.faker.time()
+
+        return self.faker.word()[:50]
 
     def save_configuration(self):
         file_path = filedialog.asksaveasfilename(defaultextension=".txt")
