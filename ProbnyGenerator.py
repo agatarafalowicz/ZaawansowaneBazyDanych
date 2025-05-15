@@ -1,4 +1,5 @@
 import secrets
+import string
 import time
 import re
 import tkinter as tk
@@ -275,16 +276,9 @@ class UniversalDataGenerator:
         self.patterns_tree.pack(fill=tk.BOTH, expand=True)
 
         self.pattern_definitions = {
-            'C': 'Cyfra (0-9)',
-            'L': 'Wielka litera (A-Z)',
-            'l': 'Mała litera (a-z)',
-            'A': 'Litera (wielka lub mała)',
-            'P': 'Płeć (K/M)',
-            'D': 'Data (YYYY-MM-DD)',
-            'K': 'Suma kontrolna (cyfra)',
-            'N': 'Liczba (1-9999)',
-            'S': 'PESEL (pełny numer)',
-            '9': 'Cyfra PESEL (0-9)'
+            'N': 'Cyfra (0-9)',
+            'D': 'Wielka litera (A-Z)',
+            'M': 'Mała litera (a-z)'
         }
 
         for symbol, definition in self.pattern_definitions.items():
@@ -492,7 +486,7 @@ class UniversalDataGenerator:
         ttk.Radiobutton(radio_frame, text="Domyślny", variable=var, value="default").pack(anchor=tk.W)
         ttk.Radiobutton(radio_frame, text="Własne wartości", variable=var, value="custom").pack(anchor=tk.W)
         ttk.Radiobutton(radio_frame, text="Wzór", variable=var, value="pattern").pack(anchor=tk.W)
-        ttk.Radiobutton(radio_frame, text="Zależny", variable=var, value="dependent").pack(anchor=tk.W)
+        #ttk.Radiobutton(radio_frame, text="Zależny", variable=var, value="dependent").pack(anchor=tk.W)
 
         if col_info['type'] in ['integer', 'numeric']:
             ttk.Radiobutton(radio_frame, text="Funkcja", variable=var, value="function").pack(anchor=tk.W)
@@ -503,7 +497,7 @@ class UniversalDataGenerator:
         self.current_config_widget = None
         self.custom_entry = ttk.Entry(input_frame)
         self.pattern_entry = ttk.Entry(input_frame)
-        self.dependent_combobox = ttk.Combobox(input_frame)
+        #self.dependent_combobox = ttk.Combobox(input_frame)
         self.function_text = tk.Text(input_frame, height=4)
 
         def update_state():
@@ -517,10 +511,10 @@ class UniversalDataGenerator:
             elif state == "pattern":
                 self.pattern_entry.pack(fill=tk.X, expand=True)
                 self.current_config_widget = self.pattern_entry
-            elif state == "dependent":
-                self.dependent_combobox['values'] = [c['name'] for c in self.tables[table] if c['name'] != column]
-                self.dependent_combobox.pack(fill=tk.X, expand=True)
-                self.current_config_widget = self.dependent_combobox
+            #elif state == "dependent":
+             #   self.dependent_combobox['values'] = [c['name'] for c in self.tables[table] if c['name'] != column]
+              #  self.dependent_combobox.pack(fill=tk.X, expand=True)
+               # self.current_config_widget = self.dependent_combobox
             elif state == "function":
                 self.function_text.pack(fill=tk.BOTH, expand=True)
                 self.current_config_widget = self.function_text
@@ -532,11 +526,11 @@ class UniversalDataGenerator:
             top, table, column, var.get(),
             self.custom_entry.get(),
             self.pattern_entry.get(),
-            self.dependent_combobox.get(),
+            #self.dependent_combobox.get(),
             self.function_text.get("1.0", tk.END)
         )).pack(pady=5)
 
-    def save_column_config(self, window, table, column, config_type, custom_values, pattern, depends_on, function):
+    def save_column_config(self, window, table, column, config_type, custom_values, pattern,  function):
         config = {}
         try:
             if config_type == "custom":
@@ -548,10 +542,10 @@ class UniversalDataGenerator:
                 if not pattern:
                     raise ValueError("Podaj wzór")
                 config = {'type': 'pattern', 'pattern': pattern}
-            elif config_type == "dependent":
-                if not depends_on:
-                    raise ValueError("Wybierz kolumnę")
-                config = {'type': 'dependent', 'depends_on': depends_on}
+           # elif config_type == "dependent":
+            #    if not depends_on:
+             #       raise ValueError("Wybierz kolumnę")
+              #  config = {'type': 'dependent', 'depends_on': depends_on}
             elif config_type == "function":
                 if not function.strip():
                     raise ValueError("Podaj kod funkcji")
@@ -924,9 +918,7 @@ class UniversalDataGenerator:
                 if rule['type'] == "custom":
                     return local_random.choice(rule['values'])
                 elif rule['type'] == "pattern":
-                    return self.generate_from_pattern(rule['pattern'], local_random)
-                elif rule['type'] == "dependent":
-                    return self.generate_dependent_value(table, column, rule['depends_on'])
+                    return self.generate_from_pattern(rule['pattern'])
                 elif rule['type'] == "function":
                     try:
                         return eval(rule['function'], {
@@ -978,27 +970,19 @@ class UniversalDataGenerator:
 
     def generate_from_pattern(self, pattern):
         result = []
+        letters_lower = string.ascii_lowercase
+        letters_upper = string.ascii_uppercase
         for char in pattern:
-            if char == 'C':
+            if char == 'N':
                 result.append(str(random.randint(0, 9)))
-            elif char == 'L':
-                result.append(chr(random.randint(65, 90)))
-            elif char == 'l':
-                result.append(chr(random.randint(97, 122)))
-            elif char == 'A':
-                result.append(chr(random.choice([random.randint(65, 90), random.randint(97, 122)])))
-            elif char == 'P':
-                result.append(random.choice(['K', 'M']))
+            elif char == 'M':
+                result.append(random.choice(letters_upper))
             elif char == 'D':
-                result.append(self.faker.date_this_decade().strftime("%Y-%m-%d"))
-            elif char == 'K':
-                result.append(str(random.randint(0, 9)))
-            elif char == 'N':
-                result.append(str(random.randint(1, 9999)))
-            elif char == 'S':
-                result.append(self.faker.pesel())
-            elif char == '9':
-                result.append(str(random.randint(0, 9)))
+                result.append(random.choice(letters_upper))
+            elif char == 'm':
+                result.append(random.choice(letters_lower))
+            elif char == 'd':
+                result.append(random.choice(letters_lower))
             else:
                 result.append(char)
         return ''.join(result)
@@ -1045,9 +1029,9 @@ class UniversalDataGenerator:
                     elif rule['type'] == "pattern":
                         line = f"{table}@{col}@PATTERN@{rule['pattern']}\n"
                         f.write(line)
-                    elif rule['type'] == "dependent":
-                        line = f"{table}@{col}@DEPENDENT@{rule['depends_on']}\n"
-                        f.write(line)
+                    #elif rule['type'] == "dependent":
+                     #   line = f"{table}@{col}@DEPENDENT@{rule['depends_on']}\n"
+                      #  f.write(line)
                     elif rule['type'] == "function":
                         line = f"{table}@{col}@FUNCTION@{rule['function']}\n"
                         f.write(line)
@@ -1081,11 +1065,11 @@ class UniversalDataGenerator:
                         'type': 'pattern',
                         'pattern': parts[3]
                     }
-                elif rule_type == "DEPENDENT":
-                    self.generation_rules[table][col] = {
-                        'type': 'dependent',
-                        'depends_on': parts[3]
-                    }
+                #elif rule_type == "DEPENDENT":
+                 #   self.generation_rules[table][col] = {
+                  #      'type': 'dependent',
+                   #     'depends_on': parts[3]
+                    #}
                 elif rule_type == "FUNCTION":
                     self.generation_rules[table][col] = {
                         'type': 'function',
