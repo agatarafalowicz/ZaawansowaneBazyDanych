@@ -54,7 +54,7 @@ def ClearData():
 
 
 def PeselGenerator(data):
-    types = {"PESEL", "BirthDay", "Genre", "Name"}
+    types = {"PESEL", "BirthDay", "Gender", "FirstName", "LastName"}
     if data not in types:
         return "wrong type of data"
 
@@ -99,11 +99,13 @@ def PeselGenerator(data):
     PESEL["PESEL"] = pesel
     PESEL["BirthDay"] = birth_date
     if gender == "M":
-        PESEL["Genre"] = "Male"
-        PESEL["Name"] = faker.name_male()
+        PESEL["Gender"] = "Male"
+        PESEL["FirstName"] = faker.first_name_male()
+        PESEL["LastName"] = faker.last_name_male()
     else:
-        PESEL["Genre"] = "Female"
-        PESEL["Name"] = faker.name_female()
+        PESEL["Gender"] = "Female"
+        PESEL["FirstName"] = faker.first_name_female()
+        PESEL["LastName"] = faker.last_name_female()
 
     return PESEL[data]
 
@@ -137,4 +139,3 @@ def VinGenerator(data):
     VIN["ModelYear"] = year_codes[year_code]
     VIN["SerialNumber"] = serial_number
     return VIN[data]
-

@@ -486,7 +486,6 @@ class UniversalDataGenerator:
         ttk.Radiobutton(radio_frame, text="Domyślny", variable=var, value="default").pack(anchor=tk.W)
         ttk.Radiobutton(radio_frame, text="Własne wartości", variable=var, value="custom").pack(anchor=tk.W)
         ttk.Radiobutton(radio_frame, text="Wzór", variable=var, value="pattern").pack(anchor=tk.W)
-        #ttk.Radiobutton(radio_frame, text="Zależny", variable=var, value="dependent").pack(anchor=tk.W)
 
         if col_info['type'] in ['integer', 'numeric']:
             ttk.Radiobutton(radio_frame, text="Funkcja", variable=var, value="function").pack(anchor=tk.W)
@@ -497,7 +496,6 @@ class UniversalDataGenerator:
         self.current_config_widget = None
         self.custom_entry = ttk.Entry(input_frame)
         self.pattern_entry = ttk.Entry(input_frame)
-        #self.dependent_combobox = ttk.Combobox(input_frame)
         self.function_text = tk.Text(input_frame, height=4)
 
         def update_state():
@@ -511,10 +509,6 @@ class UniversalDataGenerator:
             elif state == "pattern":
                 self.pattern_entry.pack(fill=tk.X, expand=True)
                 self.current_config_widget = self.pattern_entry
-            #elif state == "dependent":
-             #   self.dependent_combobox['values'] = [c['name'] for c in self.tables[table] if c['name'] != column]
-              #  self.dependent_combobox.pack(fill=tk.X, expand=True)
-               # self.current_config_widget = self.dependent_combobox
             elif state == "function":
                 self.function_text.pack(fill=tk.BOTH, expand=True)
                 self.current_config_widget = self.function_text
@@ -526,7 +520,6 @@ class UniversalDataGenerator:
             top, table, column, var.get(),
             self.custom_entry.get(),
             self.pattern_entry.get(),
-            #self.dependent_combobox.get(),
             self.function_text.get("1.0", tk.END)
         )).pack(pady=5)
 
@@ -542,10 +535,6 @@ class UniversalDataGenerator:
                 if not pattern:
                     raise ValueError("Podaj wzór")
                 config = {'type': 'pattern', 'pattern': pattern}
-           # elif config_type == "dependent":
-            #    if not depends_on:
-             #       raise ValueError("Wybierz kolumnę")
-              #  config = {'type': 'dependent', 'depends_on': depends_on}
             elif config_type == "function":
                 if not function.strip():
                     raise ValueError("Podaj kod funkcji")
@@ -637,7 +626,7 @@ class UniversalDataGenerator:
                 pk_value = match.group(2)
                 self.log(f"Duplikat klucza głównego {pk_col}={pk_value}")
                 self.generated_values_cache[(table, pk_col)].discard(pk_value)
-                self.generate_table_data(table, 1, 1)  # Regeneruj pojedynczy rekord
+                self.generate_table_data(table, 1, 1)
 
         elif "foreign key constraint" in error_msg:
             match = re.search(r'Key \((.*?)\)=\((.*?)\)', error_msg)
@@ -867,10 +856,8 @@ class UniversalDataGenerator:
             if key in self.special_data:
                 try:
                     parts = self.special_data[key].split(':')
-                    print(f"parts to {parts}")
                     if len(parts) >= 2 and parts[0].startswith("*"):
                         generator_type = parts[0][1:]
-                        print(f"generator_type to {generator_type}")
                         param = parts[1]
                         if generator_type == 'PESEL':
                             for attempt in range(self.retry_limit):
@@ -882,7 +869,6 @@ class UniversalDataGenerator:
 
                                 if not in_cache and not in_db:
                                     self.generated_values_cache[cache_key].add(pesel)
-                                    print(pesel)
                                     BasicDataGenerator.ClearSpecialValues()
                                     return pesel
 
@@ -916,7 +902,8 @@ class UniversalDataGenerator:
             if table in self.generation_rules and column in self.generation_rules[table]:
                 rule = self.generation_rules[table][column]
                 if rule['type'] == "custom":
-                    return local_random.choice(rule['values'])
+                    selected_value = local_random.choice(rule['values'])
+                    return self.process_custom(selected_value)
                 elif rule['type'] == "pattern":
                     return self.generate_from_pattern(rule['pattern'])
                 elif rule['type'] == "function":
@@ -975,6 +962,8 @@ class UniversalDataGenerator:
         for char in pattern:
             if char == 'N':
                 result.append(str(random.randint(0, 9)))
+            elif char == 'n':
+                result.append(str(random.randint(0, 9)))
             elif char == 'M':
                 result.append(random.choice(letters_upper))
             elif char == 'D':
@@ -1029,9 +1018,6 @@ class UniversalDataGenerator:
                     elif rule['type'] == "pattern":
                         line = f"{table}@{col}@PATTERN@{rule['pattern']}\n"
                         f.write(line)
-                    #elif rule['type'] == "dependent":
-                     #   line = f"{table}@{col}@DEPENDENT@{rule['depends_on']}\n"
-                      #  f.write(line)
                     elif rule['type'] == "function":
                         line = f"{table}@{col}@FUNCTION@{rule['function']}\n"
                         f.write(line)
@@ -1065,11 +1051,6 @@ class UniversalDataGenerator:
                         'type': 'pattern',
                         'pattern': parts[3]
                     }
-                #elif rule_type == "DEPENDENT":
-                 #   self.generation_rules[table][col] = {
-                  #      'type': 'dependent',
-                   #     'depends_on': parts[3]
-                    #}
                 elif rule_type == "FUNCTION":
                     self.generation_rules[table][col] = {
                         'type': 'function',
@@ -1129,6 +1110,50 @@ class UniversalDataGenerator:
             symbol = item['text']
             del self.pattern_definitions[symbol]
             self.patterns_tree.delete(selected[0])
+
+    def detect_custom(self, text):
+        """Wykrywa wzorce w tekście: (x-y), [a/b/c], "n"""
+        patterns = [
+            r'\([^()]*\)',
+            r'\[[^\[\]]*\]',
+            r'"[^"]*"'
+        ]
+        matches = []
+        for pattern in patterns:
+            matches += re.findall(pattern, text)
+        return matches
+
+    def process_custom(self, text):
+        """Przetwarza tekst zastępując wykryte wzorce wygenerowanymi wartościami"""
+        matches = self.detect_custom(text)
+        replacements = []
+        local_random = random.Random(secrets.randbits(64))
+
+        for match in matches:
+            if match.startswith('(') and match.endswith(')'):
+                content = match[1:-1]
+                if '-' in content:
+                    lower, upper = map(int, content.split('-'))
+                    replacements.append(str(local_random.randint(lower, upper)))
+                else:
+                    replacements.append(content)
+
+            elif match.startswith('[') and match.endswith(']'):
+                options = match[1:-1].split('/')
+                replacements.append(local_random.choice(options))
+
+            elif match.startswith('"') and match.endswith('"'):
+                length = int(match[1:-1])
+                replacements.append(self.faker.text(max_nb_chars=length).replace('\n', ' ')[:length])
+
+            else:
+                replacements.append(match)
+
+        processed_text = text
+        for match, replacement in zip(matches, replacements):
+            processed_text = processed_text.replace(match, replacement, 1)
+
+        return processed_text
 
 
 if __name__ == "__main__":

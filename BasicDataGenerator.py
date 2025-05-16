@@ -75,4 +75,3 @@ def GenerateData(text):
         text = text.replace(matches[x], newText[x], 1)
     return text
 
-print(GenerateData("*PESEL:BirthDay"))
