@@ -396,13 +396,25 @@ class UniversalDataGenerator:
 
     def _parse_check_clause(self, column, expr):
         expr = expr.strip()
+        any_array_match = re.search(
+            rf"{re.escape(column)}::text\s*=\s*ANY\s*\(\s*\(ARRAY\[(.*?)\]\s*(::[^\)]*)?\)",
+            expr, re.IGNORECASE
+        )
+        if any_array_match:
+            raw_values = any_array_match.group(1)
+            values = re.findall(r"'([^']*)'(?:\s*::[a-zA-Z\s]+)?", raw_values)
+            return {'type': 'IN', 'values': values}
 
-        in_match = re.search(rf"{column}\s+IN\s*\(([\d,\s]+)\)", expr, re.IGNORECASE)
+        in_match = re.search(
+            rf"{re.escape(column)}\s+IN\s*\(([\d,\s]+)\)", expr, re.IGNORECASE
+        )
         if in_match:
             values = list(map(int, in_match.group(1).split(',')))
             return {'type': 'IN', 'values': values}
 
-        conditions = re.findall(rf"{column}\s*(<=|>=|=|<|>)\s*(\d+)", expr)
+        conditions = re.findall(
+            rf"{re.escape(column)}\s*(<=|>=|=|<|>)\s*(\d+)", expr
+        )
         if conditions and len(conditions) >= 2:
             result = {}
             for op, val in conditions:
@@ -419,7 +431,9 @@ class UniversalDataGenerator:
                     result['min'] = result['max'] = val
             return {'type': 'BETWEEN', **result}
 
-        simple = re.search(rf"{column}\s*(<=|>=|=|<|>)\s*(\d+)", expr)
+        simple = re.search(
+            rf"{re.escape(column)}\s*(<=|>=|=|<|>)\s*(\d+)", expr
+        )
         if simple:
             operator, value = simple.groups()
             return {
@@ -427,6 +441,7 @@ class UniversalDataGenerator:
                 'operator': operator,
                 'value': int(value)
             }
+
         return {
             'type': 'COMPLEX',
             'expression': expr
@@ -864,26 +879,41 @@ class UniversalDataGenerator:
                 for i, (col, value) in enumerate(zip(columns, row)):
                     col_info = next(c for c in self.tables[table] if c['name'] == col)
 
-                    if col_info['type'] in ['integer', 'bigint'] and isinstance(value, int):
-                        check = self.check_constraints.get((table.lower(), col.lower()))
-                        if check:
-                            if check['type'] == 'BETWEEN' and not (check['min'] <= value <= check['max']):
+                    check = self.check_constraints.get((table.lower(), col.lower()))
+                    if not check:
+                        continue
+
+                    ctype = check['type']
+
+                    if col_info['type'] in ['integer', 'bigint']:
+                        if not isinstance(value, int):
+                            return False
+
+                        if ctype == 'BETWEEN':
+                            if not (check.get('min', float('-inf')) <= value <= check.get('max', float('inf'))):
                                 return False
-                            elif check['type'] == 'IN' and value not in check['values']:
+                        elif ctype == 'IN':
+                            if value not in check['values']:
                                 return False
-                            elif check['type'] == 'COMPARISON':
-                                operator = check['operator']
-                                constraint_value = check['value']
-                                if operator == '>=' and not (value >= constraint_value):
-                                    return False
-                                elif operator == '>' and not (value > constraint_value):
-                                    return False
-                                elif operator == '<=' and not (value <= constraint_value):
-                                    return False
-                                elif operator == '<' and not (value < constraint_value):
-                                    return False
-                                elif operator == '=' and not (value == constraint_value):
-                                    return False
+                        elif ctype == 'COMPARISON':
+                            op = check['operator']
+                            cval = check['value']
+                            if op == '>=' and not (value >= cval):
+                                return False
+                            elif op == '>' and not (value > cval):
+                                return False
+                            elif op == '<=' and not (value <= cval):
+                                return False
+                            elif op == '<' and not (value < cval):
+                                return False
+                            elif op == '=' and not (value == cval):
+                                return False
+
+                    elif col_info['type'] in ['character varying', 'text', 'varchar']:
+                        if ctype == 'IN':
+                            if str(value) not in check['values']:
+                                return False
+
 
                 return True
 
@@ -893,7 +923,7 @@ class UniversalDataGenerator:
                 while len(batch) < min(batch_size, count - total_generated) and attempts < retry_attempts:
                     try:
                         row = [self.generate_value(table, col) for col in columns]
-                        if validate_row(row):
+                        if validate_row(table, columns, row):
                             batch.append(row)
                         else:
                             self.log("Odrzucono nieprawidłowy wiersz, generuję ponownie")
@@ -1055,15 +1085,24 @@ class UniversalDataGenerator:
 
     def check_pesel_in_db(self, pesel):
         try:
-            self.cursor.execute(
-                "SELECT EXISTS(SELECT 1 FROM pacjenci WHERE pesel = %s)",
-                (pesel,)
-            )
-            return self.cursor.fetchone()[0]
+            self.cursor.execute("""
+                SELECT table_name
+                FROM information_schema.columns
+                WHERE column_name = 'pesel'
+                  AND table_schema = 'public'
+            """)
+            tables = self.cursor.fetchall()
+
+            for (table_name,) in tables:
+                query = f"SELECT EXISTS(SELECT 1 FROM {table_name} WHERE pesel = %s)"
+                self.cursor.execute(query, (pesel,))
+                if self.cursor.fetchone()[0]:
+                    return True
+
+            return False
         except Exception as e:
             self.log(f"Błąd sprawdzania PESEL: {str(e)}")
             return True
-
 
     def generate_default_pk_value(self, table, column):
         """Generuje domyślną wartość PK na podstawie typu"""
@@ -1152,10 +1191,18 @@ class UniversalDataGenerator:
 
                 elif check['type'] == 'COMPLEX':
                     expr = check.get('expression', '')
-                    match = re.search(r'ARRAY\[(.*?)\]', expr)
+                    match = re.search(r"ARRAY\[(.*?)\]", expr)
                     if match:
-                        values = list(map(int, match.group(1).split(',')))
-                        return random.choice(values)
+                        raw_values = match.group(1).strip()
+                        if re.search(r"'[^']*'", raw_values):
+                            values = re.findall(r"'([^']*)'(?:\s*::[a-z\s]+)?", raw_values)
+                        else:
+                            values = [float(v.strip()) if '.' in v else int(v.strip()) for v in raw_values.split(',')]
+
+                        if values:
+                            return random.choice(values)
+
+
 
             except Exception as e:
                 self.log(f"Błąd generowania dla {table}.{column}: {str(e)}")
