@@ -311,23 +311,6 @@ class UniversalDataGenerator:
         except Exception as e:
             messagebox.showerror("Błąd połączenia", str(e))
 
-    """
-    def generate_unique_value(self, table, column, generator):
-        Generuje unikalne wartości z uwzględnieniem istniejących danych
-        for _ in range(self.retry_limit):
-            value = generator()
-
-            if value not in self.generated_values_cache[(table, column)]:
-                query = sql.SQL("SELECT EXISTS(SELECT 1 FROM {} WHERE {} = %s)").format(
-                    sql.Identifier(table),
-                    sql.Identifier(column)
-                )
-                self.cursor.execute(query, (value,))
-                if not self.cursor.fetchone()[0]:
-                    self.generated_values_cache[(table, column)].add(value)
-                    return value
-        raise ValueError(f"Nie udało się wygenerować unikalnej wartości dla {table}.{column}")
-    """
 
     def load_table_metadata(self):
         """Ładuje metadane o kluczach głównych, obcych i zależnościach"""
@@ -371,8 +354,83 @@ class UniversalDataGenerator:
                     self.auto_increment[table] = {}
                 self.auto_increment[table][column] = True
 
+            self.parse_check_constraints()
+
         except Exception as e:
             messagebox.showerror("Błąd metadanych", str(e))
+
+    def parse_check_constraints(self):
+        """Parsuje wszystkie ograniczenia CHECK z bazy danych"""
+        self.check_constraints = defaultdict(dict)
+        try:
+            self.cursor.execute("""
+                SELECT
+                    conrelid::regclass::text AS table_name,
+                    a.attname AS column_name,
+                    pg_get_expr(c.conbin, c.conrelid) AS check_expr
+                FROM
+                    pg_constraint c
+                JOIN pg_attribute a
+                    ON a.attnum = ANY(c.conkey)
+                    AND a.attrelid = c.conrelid
+                WHERE
+                    c.contype = 'c'
+                    AND conrelid::regclass::text IN (
+                        SELECT table_name 
+                        FROM information_schema.tables 
+                        WHERE table_schema = 'public'
+                    )
+            """)
+
+            for table, column, expr in self.cursor.fetchall():
+                table = table.lower()
+                column = column.lower()
+                parsed = self._parse_check_clause(column, expr)
+                if parsed:
+                    self.check_constraints[(table, column)] = parsed
+
+            self.log(f"Zapisane ograniczenia: {dict(self.check_constraints)}")
+
+        except Exception as e:
+            self.log(f"Błąd parsowania ograniczeń CHECK: {str(e)}")
+
+    def _parse_check_clause(self, column, expr):
+        expr = expr.strip()
+
+        in_match = re.search(rf"{column}\s+IN\s*\(([\d,\s]+)\)", expr, re.IGNORECASE)
+        if in_match:
+            values = list(map(int, in_match.group(1).split(',')))
+            return {'type': 'IN', 'values': values}
+
+        conditions = re.findall(rf"{column}\s*(<=|>=|=|<|>)\s*(\d+)", expr)
+        if conditions and len(conditions) >= 2:
+            result = {}
+            for op, val in conditions:
+                val = int(val)
+                if op == '>=':
+                    result['min'] = max(result.get('min', val), val)
+                elif op == '>':
+                    result['min'] = max(result.get('min', val + 1), val + 1)
+                elif op == '<=':
+                    result['max'] = min(result.get('max', val), val)
+                elif op == '<':
+                    result['max'] = min(result.get('max', val - 1), val - 1)
+                elif op == '=':
+                    result['min'] = result['max'] = val
+            return {'type': 'BETWEEN', **result}
+
+        simple = re.search(rf"{column}\s*(<=|>=|=|<|>)\s*(\d+)", expr)
+        if simple:
+            operator, value = simple.groups()
+            return {
+                'type': 'COMPARISON',
+                'operator': operator,
+                'value': int(value)
+            }
+        return {
+            'type': 'COMPLEX',
+            'expression': expr
+        }
 
     def topological_sort(self, tables):
         """Sortuje tabele według zależności"""
@@ -474,7 +532,10 @@ class UniversalDataGenerator:
         top = tk.Toplevel(self.root)
         top.title(f"Konfiguracja {table}.{column}")
 
-        var = tk.StringVar(value="default")
+        current_config = self.generation_rules.get(table, {}).get(column, {})
+        config_type = current_config.get('type', 'default')
+
+        var = tk.StringVar(value=config_type)
         col_info = next(c for c in self.tables[table] if c['name'] == column)
 
         main_frame = ttk.Frame(top)
@@ -497,6 +558,14 @@ class UniversalDataGenerator:
         self.custom_entry = ttk.Entry(input_frame)
         self.pattern_entry = ttk.Entry(input_frame)
         self.function_text = tk.Text(input_frame, height=4)
+
+        if current_config:
+            if config_type == 'custom':
+                self.custom_entry.insert(0, ";".join(current_config.get('values', [])))
+            elif config_type == 'pattern':
+                self.pattern_entry.insert(0, current_config.get('pattern', ''))
+            elif config_type == 'function':
+                self.function_text.insert("1.0", current_config.get('function', ''))
 
         def update_state():
             if self.current_config_widget:
@@ -767,74 +836,135 @@ class UniversalDataGenerator:
             self.generate_table_data(table, 100, 10)
 
     def generate_table_data(self, table, count, batch_size):
-        columns = []
-        returning = None
-        if table in self.primary_keys:
-            pk = self.primary_keys[table][0]
-            if self.auto_increment.get(table, {}).get(pk, False):
-                columns = [col['name'] for col in self.tables[table] if col['name'] != pk]
-                returning = pk
+        """Generuje dane dla tabeli z uwzględnieniem wszystkich ograniczeń i walidacji"""
+        try:
+            columns = []
+            returning = None
+            pk_column = self.primary_keys.get(table, [None])[0]
+
+            if pk_column and self.auto_increment.get(table, {}).get(pk_column, False):
+                columns = [col['name'] for col in self.tables[table] if col['name'] != pk_column]
+                returning = pk_column
             else:
                 columns = [col['name'] for col in self.tables[table]]
-        else:
-            columns = [col['name'] for col in self.tables[table]]
 
-        query = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
-            sql.Identifier(table),
-            sql.SQL(', ').join(map(sql.Identifier, columns)),
-            sql.SQL(', ').join([sql.Placeholder()] * len(columns))
-        )
+            query = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+                sql.Identifier(table),
+                sql.SQL(', ').join(map(sql.Identifier, columns)),
+                sql.SQL(', ').join([sql.Placeholder()] * len(columns))
+            )
 
-        if returning:
-            query += sql.SQL(" RETURNING {}").format(sql.Identifier(returning))
+            if returning:
+                query += sql.SQL(" RETURNING {}").format(sql.Identifier(returning))
 
-        for i in range(0, count, batch_size):
-            current_batch = min(batch_size, count - i)
-            batch = []
-            records_to_remove = []
+            total_generated = 0
+            retry_attempts = 3
 
-            for idx in range(current_batch):
+            def validate_row(table, columns, row):
+                for i, (col, value) in enumerate(zip(columns, row)):
+                    col_info = next(c for c in self.tables[table] if c['name'] == col)
+
+                    if col_info['type'] in ['integer', 'bigint'] and isinstance(value, int):
+                        check = self.check_constraints.get((table.lower(), col.lower()))
+                        if check:
+                            if check['type'] == 'BETWEEN' and not (check['min'] <= value <= check['max']):
+                                return False
+                            elif check['type'] == 'IN' and value not in check['values']:
+                                return False
+                            elif check['type'] == 'COMPARISON':
+                                operator = check['operator']
+                                constraint_value = check['value']
+                                if operator == '>=' and not (value >= constraint_value):
+                                    return False
+                                elif operator == '>' and not (value > constraint_value):
+                                    return False
+                                elif operator == '<=' and not (value <= constraint_value):
+                                    return False
+                                elif operator == '<' and not (value < constraint_value):
+                                    return False
+                                elif operator == '=' and not (value == constraint_value):
+                                    return False
+
+                return True
+
+            while total_generated < count:
+                batch = []
+                attempts = 0
+                while len(batch) < min(batch_size, count - total_generated) and attempts < retry_attempts:
+                    try:
+                        row = [self.generate_value(table, col) for col in columns]
+                        if validate_row(row):
+                            batch.append(row)
+                        else:
+                            self.log("Odrzucono nieprawidłowy wiersz, generuję ponownie")
+                            attempts += 1
+                    except ValueError as e:
+                        self.log(f"Błąd generowania: {str(e)}")
+                        attempts += 1
+
+                if not batch:
+                    self.log(f"Nie udało się wygenerować prawidłowych danych dla {table}")
+                    break
+
                 try:
-                    row = [self.generate_value(table, col) for col in columns]
-                    if table in self.primary_keys and not self.auto_increment.get(table, {}).get(
-                            self.primary_keys[table][0], False):
-                        pk_value = row[self.primary_keys[table].index(self.primary_keys[table][0])]
-                        if pk_value in self.generated_values_cache[(table, self.primary_keys[table][0])]:
-                            raise ValueError(f"Duplikat PK {pk_value} w batchu")
-                    batch.append(row)
-                except ValueError as e:
-                    self.log(str(e))
-                    records_to_remove.append(idx)
-                    continue
+                    if returning:
+                        new_ids = []
+                        for record in batch:
+                            self.cursor.execute(query, record)
+                            new_id = self.cursor.fetchone()[0]
+                            new_ids.append(new_id)
+                            self.generated_values_cache[(table, returning)].add(str(new_id))
+                        self.generated_ids[table].extend(new_ids)
+                    else:
+                        self.cursor.executemany(query, batch)
 
-            for idx in reversed(records_to_remove):
-                del batch[idx]
+                    self.conn.commit()
+                    success_count = len(batch)
+                    total_generated += success_count
+                    self.log(f"Dodano {success_count} rekordów do {table} (łącznie: {total_generated}/{count})")
 
-            if not batch:
-                continue
+                except psycopg2.IntegrityError as e:
+                    self.conn.rollback()
+                    self.handle_integrity_error(e, table, columns, batch)
 
-            try:
-                if returning:
-                    ids = []
                     for record in batch:
-                        self.cursor.execute(query, record)
-                        new_id = self.cursor.fetchone()[0]
-                        ids.append(new_id)
-                    self.generated_ids[table].extend(ids)
-                else:
-                    self.cursor.executemany(query, batch)
+                        try:
+                            if returning:
+                                self.cursor.execute(query, record)
+                                new_id = self.cursor.fetchone()[0]
+                                self.generated_ids[table].append(new_id)
+                            else:
+                                self.cursor.execute(query, record)
+                            self.conn.commit()
+                        except Exception as single_error:
+                            self.conn.rollback()
+                            self.log(f"Błąd przy ponownym wstawianiu pojedynczego rekordu: {str(single_error)}")
 
-                self.conn.commit()
-                success_count = len(batch)
-                self.log(f"Dodano {success_count} rekordów do {table}")
+                except Exception as e:
+                    self.conn.rollback()
+                    self.log(f"Krytyczny błąd: {str(e)}")
+                    break
 
-                if len(batch) < current_batch:
-                    diff = current_batch - len(batch)
-                    self.generate_table_data(table, diff, diff)
+            if pk_column:
+                try:
+                    self.cursor.execute(
+                        sql.SQL("SELECT {} FROM {} ORDER BY {} DESC LIMIT {}").format(
+                            sql.Identifier(pk_column),
+                            sql.Identifier(table),
+                            sql.Identifier(pk_column),
+                            sql.Literal(total_generated)
+                        )
+                    )
+                    new_values = {str(r[0]) for r in self.cursor.fetchall()}
+                    self.generated_values_cache[(table, pk_column)].update(new_values)
+                except Exception as e:
+                    self.log(f"Błąd aktualizacji cache: {str(e)}")
 
-            except psycopg2.IntegrityError as e:
-                self.conn.rollback()
-                self.handle_integrity_error(e, table, columns, batch)
+            return total_generated
+
+        except Exception as main_error:
+            self.log(f"Krytyczny błąd w generate_table_data: {str(main_error)}")
+            raise
 
     def get_record_count(self, table):
         """Zwraca liczbę istniejących rekordów w tabeli"""
@@ -977,8 +1107,59 @@ class UniversalDataGenerator:
         return ''.join(result)
 
     def generate_default_value(self, table, column):
-        """Generuje bezpieczną wartość domyślną na podstawie typu kolumny"""
+        """Generuje wartość uwzględniającą ograniczenia CHECK"""
         col_info = next(c for c in self.tables[table] if c['name'] == column)
+        key = (table.lower(), column.lower())
+        check = self.check_constraints.get(key)
+
+        if check:
+            try:
+                if check['type'] == 'IN' and check.get('values'):
+                    return random.choice(check['values'])
+
+                elif check['type'] == 'BETWEEN':
+                    return random.randint(check['min'], check['max'])
+
+                elif check['type'] == 'COMPARISON':
+                    operator = check['operator']
+                    constraint_value = check['value']
+
+                    if col_info['type'] in ['integer', 'bigint']:
+                        min_val = 1
+                        max_val = 2147483647
+
+                        if operator == '>=':
+                            min_val = constraint_value
+                        elif operator == '>':
+                            min_val = constraint_value + 1
+                        elif operator == '<=':
+                            max_val = constraint_value
+                        elif operator == '<':
+                            max_val = constraint_value - 1
+                        elif operator == '=':
+                            min_val = max_val = constraint_value
+
+                        return random.randint(min_val, max_val)
+
+                    elif 'date' in col_info['type'].lower():
+                        current_year = datetime.now().year
+                        if check['type'] in ['>=', '>']:
+                            return random.randint(
+                                max(constraint_value, 1888),
+                                current_year
+                            )
+                        return random.randint(1888, current_year)
+
+                elif check['type'] == 'COMPLEX':
+                    expr = check.get('expression', '')
+                    match = re.search(r'ARRAY\[(.*?)\]', expr)
+                    if match:
+                        values = list(map(int, match.group(1).split(',')))
+                        return random.choice(values)
+
+            except Exception as e:
+                self.log(f"Błąd generowania dla {table}.{column}: {str(e)}")
+                self.log(f"Szczegóły ograniczenia: {check}")
 
         if col_info['type'] in ['integer', 'bigint']:
             return random.randint(1, 2147483647)
