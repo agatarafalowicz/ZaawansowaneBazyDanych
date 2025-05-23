@@ -54,7 +54,7 @@ def ClearData():
 
 
 def PeselGenerator(data):
-    types = {"PESEL", "BirthDay", "Gender", "FirstName", "LastName", "Name"}
+    types = {"PESEL", "BirthDay", "Gender", "FirstName", "LastName", "Name", "Email"}
     if data not in types:
         return "wrong type of data"
 
@@ -100,14 +100,20 @@ def PeselGenerator(data):
     PESEL["BirthDay"] = birth_date
     if gender == "M":
         PESEL["Gender"] = "Male"
-        PESEL["Name"] = faker.name_male()
-        PESEL["FirstName"] = faker.first_name_male()
-        PESEL["LastName"] = faker.last_name_male()
+        firstNameM = faker.first_name_male()
+        lastNameM = faker.last_name_male()
+        PESEL["Name"] = firstNameM + " " + lastNameM
+        PESEL["FirstName"] = firstNameM
+        PESEL["LastName"] = lastNameM
+        PESEL["Email"] = firstNameM + "." + lastNameM + "@przychodnia.com"
     else:
         PESEL["Gender"] = "Female"
-        PESEL["Name"] = faker.name_female()
-        PESEL["FirstName"] = faker.first_name_female()
-        PESEL["LastName"] = faker.last_name_female()
+        firstNameF = faker.first_name_female()
+        lastNameF = faker.last_name_female()
+        PESEL["Name"] = firstNameF + " " + lastNameF
+        PESEL["FirstName"] = firstNameF
+        PESEL["LastName"] = lastNameF
+        PESEL["Email"] = firstNameF + "." + lastNameF + "@przychodnia.com"
 
     return PESEL[data]
 

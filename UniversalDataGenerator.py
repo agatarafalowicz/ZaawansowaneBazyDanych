@@ -265,9 +265,9 @@ class UniversalDataGenerator:
 
     def setup_patterns_tab(self):
         tab = ttk.Frame(self.notebook)
-        self.notebook.add(tab, text="Wzorce")
+        self.notebook.add(tab, text="Własne wartości i wzorce")
 
-        frame = ttk.LabelFrame(tab, text="Definicje wzorców")
+        frame = ttk.LabelFrame(tab, text="Definicje wzorców i własnych wartości")
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
         self.patterns_tree = ttk.Treeview(frame, columns=("definition"), selectmode="browse")
@@ -276,9 +276,12 @@ class UniversalDataGenerator:
         self.patterns_tree.pack(fill=tk.BOTH, expand=True)
 
         self.pattern_definitions = {
-            'N': 'Cyfra (0-9)',
-            'D': 'Wielka litera (A-Z)',
-            'M': 'Mała litera (a-z)'
+            '(liczba-liczba)': 'Generator liczb z zakresu',
+            '[wartość/wartość]': 'Wybór losowej wartości z listy',
+            '"liczba"': 'Losowy tekst o długości podanej liczby',
+            'N': 'Wzorzec dla cyfry (0-9)',
+            'D': 'Wzorzec dla wielkiej litery (A-Z)',
+            'M': 'Wzorzec dla małej litery (a-z)'
         }
 
         for symbol, definition in self.pattern_definitions.items():
@@ -563,9 +566,6 @@ class UniversalDataGenerator:
         ttk.Radiobutton(radio_frame, text="Własne wartości", variable=var, value="custom").pack(anchor=tk.W)
         ttk.Radiobutton(radio_frame, text="Wzór", variable=var, value="pattern").pack(anchor=tk.W)
 
-        if col_info['type'] in ['integer', 'numeric']:
-            ttk.Radiobutton(radio_frame, text="Funkcja", variable=var, value="function").pack(anchor=tk.W)
-
         input_frame = ttk.Frame(main_frame)
         input_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -613,7 +613,7 @@ class UniversalDataGenerator:
             if config_type == "custom":
                 values = [v.strip() for v in custom_values.split(";") if v.strip()]
                 if not values:
-                    raise ValueError("Podaj wartości oddzielone średnikami")
+                    raise ValueError("Podaj wartości według konfiguracji")
                 config = {'type': 'custom', 'values': values}
             elif config_type == "pattern":
                 if not pattern:
@@ -1131,16 +1131,10 @@ class UniversalDataGenerator:
         for char in pattern:
             if char == 'N':
                 result.append(str(random.randint(0, 9)))
-            elif char == 'n':
-                result.append(str(random.randint(0, 9)))
             elif char == 'M':
                 result.append(random.choice(letters_upper))
             elif char == 'D':
                 result.append(random.choice(letters_upper))
-            elif char == 'm':
-                result.append(random.choice(letters_lower))
-            elif char == 'd':
-                result.append(random.choice(letters_lower))
             else:
                 result.append(char)
         return ''.join(result)
